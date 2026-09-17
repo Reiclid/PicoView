@@ -1,0 +1,62 @@
+# =============================================================================
+# PicoView (PictureGift) .gitignore
+# =============================================================================
+
+# Build outputs and intermediate files
+build/
+bin/
+obj/
+out/
+x64/
+x86/
+ARM64/
+
+# Executables and libraries
+*.exe
+*.dll
+*.so
+*.dylib
+*.lib
+*.exp
+*.ilk
+*.pdb
+*.obj
+*.res
+*.idb
+
+# Runtime settings and local state (stores user paths, window positions, history)
+*.ini
+!default*.ini
+!template*.ini
+
+# Logs, dumps, and temp files
+*.log
+*.tmp
+*.temp
+*.dmp
+*.mdmp
+
+# Visual Studio / MSVC
+.vs/
+*.suo
+*.user
+*.userosv
+*.sln.docstates
+*.VC.db
+*.VC.opendb
+
+# VS Code & JetBrains
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Windows system files
+Thumbs.db
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+$RECYCLE.BIN/

@@ -1,0 +1,54 @@
+@echo off
+rem ===========================================================================
+rem  PictureGift - build script
+rem  Produces a single portable PictureGift.exe (static CRT, no dependencies).
+rem  Requires Visual Studio Build Tools with the "Desktop development with C++"
+rem  workload.  Just run:  build.bat
+rem ===========================================================================
+setlocal enabledelayedexpansion
+cd /d "%~dp0"
+
+if "%VSCMD_ARG_TGT_ARCH%"=="x64" goto :have_env
+
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if not exist "%VSWHERE%" (
+  echo [!] Visual Studio Installer not found.
+  echo     Install "Build Tools for Visual Studio" with the C++ workload.
+  exit /b 1
+)
+
+set "VCVARS="
+for /f "usebackq delims=" %%i in (`"%VSWHERE%" -products * -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2^>nul`) do (
+  if exist "%%i\VC\Auxiliary\Build\vcvars64.bat" set "VCVARS=%%i\VC\Auxiliary\Build\vcvars64.bat"
+)
+if not defined VCVARS (
+  for /f "usebackq delims=" %%i in (`"%VSWHERE%" -products * -all -property installationPath 2^>nul`) do (
+    if exist "%%i\VC\Auxiliary\Build\vcvars64.bat" set "VCVARS=%%i\VC\Auxiliary\Build\vcvars64.bat"
+  )
+)
+if not defined VCVARS (
+  echo [!] vcvars64.bat not found - the C++ toolset is not installed.
+  exit /b 1
+)
+call "%VCVARS%" >nul || (echo [!] vcvars64 failed & exit /b 1)
+
+:have_env
+if not exist build mkdir build
+
+echo [1/2] resources
+rc /nologo /fo build\app.res res\app.rc || exit /b 1
+
+echo [2/2] compiling
+set CFLAGS=/nologo /std:c++17 /utf-8 /permissive- /Zc:__cplusplus /W3 /MP /EHsc /DUNICODE /D_UNICODE /O2 /Oi /Gy /DNDEBUG /MT
+set LFLAGS=/link /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /INCREMENTAL:NO
+set LIBS=user32.lib gdi32.lib shell32.lib shlwapi.lib ole32.lib oleaut32.lib uuid.lib ^
+ comdlg32.lib advapi32.lib propsys.lib d3d11.lib dxgi.lib d2d1.lib dwrite.lib dcomp.lib ^
+ windowscodecs.lib dwmapi.lib mfplat.lib mfuuid.lib mfreadwrite.lib
+
+cl %CFLAGS% /Fo:build\ /Fd:build\ src\main.cpp src\ui.cpp src\gfx.cpp src\decode.cpp ^
+   src\loader.cpp src\util.cpp src\video.cpp src\lang.cpp build\app.res /Fe:PictureGift.exe %LFLAGS% %LIBS% || exit /b 1
+
+echo.
+for %%F in (PictureGift.exe) do echo    PictureGift.exe  -  %%~zF bytes
+echo    Done.
+endlocal

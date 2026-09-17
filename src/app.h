@@ -1,0 +1,214 @@
+// Application state shared by main.cpp (windowing, input) and ui.cpp (drawing).
+#pragma once
+#include "pg.h"
+
+struct Picture {
+    wstring              path;
+    ComPtr<ID2D1Bitmap1> bmp;
+    int      w = 0, h = 0;          // bitmap pixels
+    int      srcW = 0, srcH = 0;    // true pixels of the file
+    bool     full = false;          // bmp is native resolution
+    bool     preview = false;       // bmp is a low-res placeholder
+    bool     hasAlpha = false;
+    bool     failed = false;
+    wstring  error;
+    ExifInfo exif;
+    bool     exifRead = false;
+    uint64_t fileSize = 0;
+    FILETIME mtime{};
+    double   decodeMs = 0;
+    double   shownAt = 0;
+    int      frameCount = 1;
+    bool     upgrading = false;     // a higher-res decode is in flight
+    int      upgradeW = 0;
+};
+
+struct Thumb {
+    ComPtr<ID2D1Bitmap1> bmp;
+    int    w = 0, h = 0;
+    bool   requested = false;
+    bool   failed = false;
+    double arrivedAt = 0;
+};
+
+enum class View { Viewer, Grid };
+
+struct Rects {
+    D2D1_RECT_F client{};
+    D2D1_RECT_F titlebar{};
+    D2D1_RECT_F caption{};        // draggable part of the titlebar
+    D2D1_RECT_F btnMin{}, btnMax{}, btnClose{};
+    D2D1_RECT_F content{};        // below the titlebar, left of the info panel
+    D2D1_RECT_F canvas{};         // image area (viewer)
+    D2D1_RECT_F filmstrip{};
+    D2D1_RECT_F commandBar{};
+    D2D1_RECT_F info{};
+    D2D1_RECT_F gridHeader{};
+    D2D1_RECT_F grid{};
+};
+
+// What the viewer looked like for a given file, so coming back to it restores
+// the zoom and orientation you left it at.
+struct ViewState {
+    float zoom = 1.f, panX = 0, panY = 0;
+    int   rot = 0;
+    bool  flipH = false, flipV = false;
+    int   fit = 0;                 // Fit enum as int
+};
+
+struct Toast {
+    wstring text;
+    double  until = 0;
+};
+
+struct App {
+    HWND      hwnd = nullptr;
+    HINSTANCE inst = nullptr;
+    Gfx       gfx;
+    Theme     th;
+    Settings  cfg;
+    Loader    loader;
+    VideoPlayer  video;
+    VideoPreview preview;
+    ResumeStore  resume;
+    double  pendingResume = -1;
+    ImageFolder    folder;
+    Rects     R;
+    UiInput   in;
+
+    // ---- navigation
+    int     index = -1;
+    wstring pendingPath;          // opened before the folder scan finished
+    bool    folderScanned = false;
+
+    // ---- caches
+    std::unordered_map<wstring, std::shared_ptr<Picture>> pics;
+    std::deque<wstring>                                   picLru;
+    std::unordered_map<wstring, std::shared_ptr<Thumb>>   thumbs;
+    std::deque<wstring>                                   thumbLru;
+    size_t  picBudget = 10;
+    size_t  thumbBudget = 900;
+
+    // ---- video
+    bool   videoMode = false;
+    bool   videoInit = false;
+    bool   seekDragging = false;
+    double seekPreview = 0;
+    double videoBarHidden = 0;
+    double seekFlashUntil = 0;      // transient "-5 s" / "+5 s" overlay
+    int    seekFlashDir = 0;
+    double seekFlashAmount = 0;
+    ComPtr<ID2D1Bitmap1> previewBmp;   // frame under the seek cursor
+    int    previewW = 0, previewH = 0;
+    double previewAt = -1;
+    double previewWant = -1;
+
+    std::unordered_map<wstring, ViewState> viewStates;
+    std::deque<wstring> viewStateLru;
+    bool   hasPendingView = false;
+    ViewState pendingView;
+
+    // ---- viewer state
+    View   view = View::Viewer;
+    Fit    fitMode = Fit::Window;
+    float  zoom = 1.f, zoomTarget = 1.f;
+    float  panX = 0, panY = 0, panTargetX = 0, panTargetY = 0;
+    int    rot = 0;                 // 0..3, user rotation (x90 CW)
+    bool   flipH = false, flipV = false;
+    bool   dragging = false;
+    POINT  dragOrigin{};
+    float  dragPanX = 0, dragPanY = 0;
+    bool   fullscreen = false;
+    WINDOWPLACEMENT prevPlacement{};
+    bool   slideshow = false;
+    double slideshowNext = 0;
+    float  fadeIn = 1.f;            // cross-fade when a new image lands
+
+    // ---- grid state
+    float  gridScroll = 0, gridScrollTarget = 0;
+    int    gridHover = -1;
+    int    gridCols = 1;
+    float  gridRowH = 1;
+    int    filmHover = -1;
+    float  filmScroll = 0, filmScrollTarget = 0;
+
+    // ---- ui bookkeeping
+    int    hot = 0, active = 0, pressedId = 0;
+    LPCWSTR wantCursor = IDC_ARROW;    // decided while drawing the frame
+    LPCWSTR shownCursor = nullptr;
+    int    pendingCmd = CMD_NONE;
+    double lastMouseMove = 0;
+    float  barAlpha = 1.f;
+    bool   barPinned = false;
+    wstring tipText;
+    D2D1_RECT_F tipAnchor{};
+    Toast  toast;
+    bool   animating = false;
+    bool   showHelp = false;
+    bool   sortMenuOpen = false;
+    D2D1_RECT_F sortMenuRect{};
+    bool   settingsOpen = false;
+    float  settingsScroll = 0, settingsScrollMax = 0;
+    int    settingsTab = 0;
+    bool   settingsDirty = false;
+    std::vector<wstring>        assocAll;
+    std::unordered_set<wstring> assocSel;
+    bool   assocLoaded = false;
+    bool   moreMenuOpen = false;
+    D2D1_RECT_F moreMenuAnchor{};
+    D2D1_RECT_F moreMenuBounds{};
+    float  menuScroll = 0, menuScrollMax = 0;
+    wstring mediaPropsPath;
+    std::vector<std::pair<wstring, wstring>> mediaProps;
+    bool   needRelayout = true;
+    double lastFrame = 0;
+    double startupAt = 0;
+    bool   firstImageShown = false;
+    double firstImageMs = 0;
+
+    // ---- helpers implemented in main.cpp
+    void invalidate();
+    void requestAnim();
+    void showToast(const wstring& t, double seconds = 1.8);
+    std::shared_ptr<Picture> current();
+    std::shared_ptr<Thumb>   thumbFor(const wstring& path, int px, bool request);
+    wstring currentPath() const;
+    void openPath(const wstring& path);
+    void scanFolderNow(const wstring& dir, const wstring& select);
+    void goTo(int newIndex, bool resetView);
+    void step(int delta);
+    void requestPicture(const wstring& path, bool exif, int prio);
+    void preload();
+    void applyFit(bool animate);
+    void setZoom(float z, D2D1_POINT_2F anchorPx, bool animate);
+    void clampPan();
+    void setView(View v);
+    void setFullscreen(bool on);
+    void applyTheme();
+    void applyBackdrop();
+    void applyTopmost();
+    void storeResume();
+    void loadAssociations();
+    bool blurActive = false;
+    // In "window follows the picture" the title bar floats over the image and
+    // fades with the command bar, so the window is exactly the picture.
+    bool titleOverlay() const { return cfg.autoSize == 2 && !fullscreen; }
+    void copyToClipboard();
+    void deleteCurrent();
+    void openFileDialog();
+    void openFolderDialog();
+    void revealInExplorer();
+    void setAsWallpaper();
+    D2D1_RECT_F imageRect();        // where the current image lands, in px
+    bool sourceSize(int& w, int& h);   // pixel size of whatever is on screen
+    void autoSizeWindow();             // AutoSize == 2: window follows the picture
+    void rememberView();               // stash the current zoom/orientation
+    void takePendingView();            // apply a stashed one after the fit
+    void openVideo(const wstring& path);
+    void videoSeekBy(double delta);
+    void videoSeekTo(double seconds);
+    void leaveVideo();
+    void trimCaches();
+};
+
+extern App* g_app;
