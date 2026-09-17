@@ -24,6 +24,11 @@ ARM64/
 *.res
 *.idb
 
+# Archives / Release packages
+*.zip
+*.7z
+*.tar.gz
+
 # Runtime settings and local state (stores user paths, window positions, history)
 *.ini
 !default*.ini
