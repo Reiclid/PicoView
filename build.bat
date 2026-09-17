@@ -1,7 +1,7 @@
 @echo off
 rem ===========================================================================
-rem  PictureGift - build script
-rem  Produces a single portable PictureGift.exe (static CRT, no dependencies).
+rem  PicoView - build script
+rem  Produces a single portable PicoView.exe (static CRT, no dependencies).
 rem  Requires Visual Studio Build Tools with the "Desktop development with C++"
 rem  workload.  Just run:  build.bat
 rem ===========================================================================
@@ -46,9 +46,9 @@ set LIBS=user32.lib gdi32.lib shell32.lib shlwapi.lib ole32.lib oleaut32.lib uui
  windowscodecs.lib dwmapi.lib mfplat.lib mfuuid.lib mfreadwrite.lib
 
 cl %CFLAGS% /Fo:build\ /Fd:build\ src\main.cpp src\ui.cpp src\gfx.cpp src\decode.cpp ^
-   src\loader.cpp src\util.cpp src\video.cpp src\lang.cpp build\app.res /Fe:PictureGift.exe %LFLAGS% %LIBS% || exit /b 1
+   src\loader.cpp src\util.cpp src\video.cpp src\lang.cpp build\app.res /Fe:PicoView.exe %LFLAGS% %LIBS% || exit /b 1
 
 echo.
-for %%F in (PictureGift.exe) do echo    PictureGift.exe  -  %%~zF bytes
+for %%F in (PicoView.exe) do echo    PicoView.exe  -  %%~zF bytes
 echo    Done.
 endlocal

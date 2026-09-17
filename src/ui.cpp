@@ -477,7 +477,7 @@ static void drawTitlebar(App& a) {
     wstring title, sub;
     auto pic = a.current();
     if (a.view == View::Grid) {
-        title = a.folder.dir().empty() ? L"PictureGift" : fileNameOf(a.folder.dir());
+        title = a.folder.dir().empty() ? L"PicoView" : fileNameOf(a.folder.dir());
         sub = a.folder.count() ? (std::to_wstring(a.folder.count()) + T(L" зображень")) : L"";
     } else if (a.videoMode) {
         title = fileNameOf(a.currentPath());
@@ -495,7 +495,7 @@ static void drawTitlebar(App& a) {
             if (a.folder.count() > 1) sub += L"  ·  " + std::to_wstring(a.index + 1) + L"/" + std::to_wstring(a.folder.count());
         }
     } else {
-        title = L"PictureGift";
+        title = L"PicoView";
         sub = T(L"Швидкий переглядач зображень");
     }
 

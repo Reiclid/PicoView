@@ -16,12 +16,12 @@ BEGIN
   BEGIN
     BLOCK "040904b0"
     BEGIN
-      VALUE "CompanyName",      "PictureGift"
-      VALUE "FileDescription",  "PictureGift - fast portable image viewer"
+      VALUE "CompanyName",      "PicoView"
+      VALUE "FileDescription",  "PicoView - fast portable image and video viewer"
       VALUE "FileVersion",      "1.0.0.0"
-      VALUE "InternalName",     "PictureGift"
-      VALUE "OriginalFilename", "PictureGift.exe"
-      VALUE "ProductName",      "PictureGift"
+      VALUE "InternalName",     "PicoView"
+      VALUE "OriginalFilename", "PicoView.exe"
+      VALUE "ProductName",      "PicoView"
       VALUE "ProductVersion",   "1.0.0.0"
     END
   END

@@ -1,4 +1,4 @@
-// PictureGift - ultralight portable image viewer for Windows 11
+// PicoView - ultralight portable image viewer for Windows 11
 // Shared declarations.
 #pragma once
 
@@ -72,7 +72,7 @@ wstring exePath();
 wstring exeDir();
 bool    fileExists(const wstring& p);
 bool    dirExists(const wstring& p);
-// Registers PictureGift in the "Open with" list for the given extensions.
+// Registers PicoView in the "Open with" list for the given extensions.
 // HKCU only: Windows 11 does not let an app make itself the default silently.
 bool    registerAssociations(const std::vector<wstring>& exts);
 void    unregisterAssociations(const std::vector<wstring>& allExts);

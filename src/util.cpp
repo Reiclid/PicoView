@@ -91,7 +91,7 @@ void pgLog(const char* fmt, ...) {
     va_list ap; va_start(ap, fmt);
     _vsnprintf_s(msg, sizeof(msg), _TRUNCATE, fmt, ap);
     va_end(ap);
-    wstring path = joinPath(exeDir(), L"picturegift.log");
+    wstring path = joinPath(exeDir(), L"picoview.log");
     HANDLE h = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
@@ -184,13 +184,13 @@ static bool regSetString(const wstring& sub, const wchar_t* name, const wstring&
     return r == ERROR_SUCCESS;
 }
 
-static const wchar_t* kAppKey = L"Software\\Classes\\Applications\\PictureGift.exe";
+static const wchar_t* kAppKey = L"Software\\Classes\\Applications\\PicoView.exe";
 
 bool registerAssociations(const std::vector<wstring>& exts) {
     wstring exe = exePath();
     if (exe.empty()) return false;
 
-    regSetString(kAppKey, L"FriendlyAppName", L"PictureGift");
+    regSetString(kAppKey, L"FriendlyAppName", L"PicoView");
     regSetString(wstring(kAppKey) + L"\\shell\\open\\command", nullptr, L"\"" + exe + L"\" \"%1\"");
     regSetString(wstring(kAppKey) + L"\\DefaultIcon", nullptr, L"\"" + exe + L"\",0");
 
@@ -198,7 +198,7 @@ bool registerAssociations(const std::vector<wstring>& exts) {
     for (const auto& e : exts) {
         regSetString(wstring(kAppKey) + L"\\SupportedTypes", e.c_str(), L"");
         HKEY k = nullptr;
-        wstring ow = L"Software\\Classes\\" + e + L"\\OpenWithList\\PictureGift.exe";
+        wstring ow = L"Software\\Classes\\" + e + L"\\OpenWithList\\PicoView.exe";
         if (RegCreateKeyExW(HKEY_CURRENT_USER, ow.c_str(), 0, nullptr, 0, KEY_WRITE, nullptr, &k, nullptr)
             == ERROR_SUCCESS) RegCloseKey(k);
     }
@@ -209,7 +209,7 @@ bool registerAssociations(const std::vector<wstring>& exts) {
 void unregisterAssociations(const std::vector<wstring>& allExts) {
     RegDeleteTreeW(HKEY_CURRENT_USER, kAppKey);
     for (const auto& e : allExts) {
-        wstring ow = L"Software\\Classes\\" + e + L"\\OpenWithList\\PictureGift.exe";
+        wstring ow = L"Software\\Classes\\" + e + L"\\OpenWithList\\PicoView.exe";
         RegDeleteTreeW(HKEY_CURRENT_USER, ow.c_str());
     }
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
@@ -370,7 +370,7 @@ void ImageFolder::removeAt(size_t i) {
 // ------------------------------------------------------------------ settings
 wstring Settings::file() const {
     // Portable first: keep the ini next to the exe when that folder is writable.
-    wstring local = joinPath(exeDir(), L"PictureGift.ini");
+    wstring local = joinPath(exeDir(), L"PicoView.ini");
     HANDLE h = CreateFileW(local.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h != INVALID_HANDLE_VALUE) { CloseHandle(h); return local; }
@@ -378,16 +378,16 @@ wstring Settings::file() const {
     PWSTR appData = nullptr;
     wstring dir;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &appData))) {
-        dir = joinPath(appData, L"PictureGift");
+        dir = joinPath(appData, L"PicoView");
         CoTaskMemFree(appData);
         CreateDirectoryW(dir.c_str(), nullptr);
-        return joinPath(dir, L"PictureGift.ini");
+        return joinPath(dir, L"PicoView.ini");
     }
     return local;
 }
 
 static int iniInt(const wstring& f, const wchar_t* key, int def) {
-    return (int)GetPrivateProfileIntW(L"PictureGift", key, def, f.c_str());
+    return (int)GetPrivateProfileIntW(L"PicoView", key, def, f.c_str());
 }
 
 void Settings::load() {
@@ -420,7 +420,7 @@ void Settings::load() {
     alwaysOnTop = iniInt(f, L"AlwaysOnTop", alwaysOnTop) != 0;
     resumeVideo = iniInt(f, L"ResumeVideo", resumeVideo) != 0;
     { wchar_t ab[4096] = {};
-      GetPrivateProfileStringW(L"PictureGift", L"Associations", L"", ab, 4096, f.c_str());
+      GetPrivateProfileStringW(L"PicoView", L"Associations", L"", ab, 4096, f.c_str());
       associations = ab; }
     fullscreen = iniInt(f, L"Fullscreen", fullscreen) != 0;
     lastZoom = clampi(iniInt(f, L"LastZoom", 0), 0, 6400) / 100.f;
@@ -434,16 +434,16 @@ void Settings::load() {
     placement.bottom = iniInt(f, L"WinH", 0);
 
     wchar_t buf[MAX_PATH * 2] = {};
-    GetPrivateProfileStringW(L"PictureGift", L"LastFolder", L"", buf, MAX_PATH * 2, f.c_str());
+    GetPrivateProfileStringW(L"PicoView", L"LastFolder", L"", buf, MAX_PATH * 2, f.c_str());
     lastFolder = buf;
-    GetPrivateProfileStringW(L"PictureGift", L"LastFile", L"", buf, MAX_PATH * 2, f.c_str());
+    GetPrivateProfileStringW(L"PicoView", L"LastFile", L"", buf, MAX_PATH * 2, f.c_str());
     lastFile = buf;
 }
 
 void Settings::save() const {
     wstring f = file();
     auto put = [&](const wchar_t* k, int v) {
-        WritePrivateProfileStringW(L"PictureGift", k, std::to_wstring(v).c_str(), f.c_str());
+        WritePrivateProfileStringW(L"PicoView", k, std::to_wstring(v).c_str(), f.c_str());
     };
     put(L"ThemeMode", themeMode);
     put(L"ViewMode", viewMode);
@@ -477,7 +477,7 @@ void Settings::save() const {
     put(L"WinY", placement.top);
     put(L"WinW", placement.right);
     put(L"WinH", placement.bottom);
-    WritePrivateProfileStringW(L"PictureGift", L"LastFolder", lastFolder.c_str(), f.c_str());
-    WritePrivateProfileStringW(L"PictureGift", L"LastFile", lastFile.c_str(), f.c_str());
-    WritePrivateProfileStringW(L"PictureGift", L"Associations", associations.c_str(), f.c_str());
+    WritePrivateProfileStringW(L"PicoView", L"LastFolder", lastFolder.c_str(), f.c_str());
+    WritePrivateProfileStringW(L"PicoView", L"LastFile", lastFile.c_str(), f.c_str());
+    WritePrivateProfileStringW(L"PicoView", L"Associations", associations.c_str(), f.c_str());
 }

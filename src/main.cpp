@@ -3,7 +3,7 @@
 
 App* g_app = nullptr;
 
-static const wchar_t* kClass = L"PictureGiftWindow";
+static const wchar_t* kClass = L"PicoViewWindow";
 enum { TIMER_ANIM = 1, TIMER_SLIDESHOW = 2, TIMER_UNQUIET = 3, TIMER_BARHIDE = 4 };
 
 // DWM bits that are not in every SDK header.
@@ -1697,7 +1697,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // Hold Shift while opening (or pass --new) to get a separate window anyway.
     HANDLE instanceMutex = nullptr;
     if (app.cfg.singleInstance && !forceNewWindow && !(GetKeyState(VK_SHIFT) & 0x8000)) {
-        instanceMutex = CreateMutexW(nullptr, TRUE, L"PictureGift.SingleInstance.v1");
+        instanceMutex = CreateMutexW(nullptr, TRUE, L"PicoView.SingleInstance.v1");
         if (instanceMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
             HWND other = FindWindowW(kClass, nullptr);
             if (other) {
@@ -1748,7 +1748,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     }
 
     HWND hwnd = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_ACCEPTFILES,
-                                kClass, L"PictureGift", WS_OVERLAPPEDWINDOW,
+                                kClass, L"PicoView", WS_OVERLAPPEDWINDOW,
                                 x, y, w, h, nullptr, nullptr, hInst, nullptr);
     if (!hwnd) return 1;
     app.hwnd = hwnd;
@@ -1794,7 +1794,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     pgLog("t+%.1f decode submitted", (nowSec() - app.startupAt) * 1000);
     if (!app.gfx.init(hwnd)) {
-        MessageBoxW(nullptr, T(L"Не вдалося ініціалізувати Direct3D / Direct2D."), L"PictureGift", MB_ICONERROR);
+        MessageBoxW(nullptr, T(L"Не вдалося ініціалізувати Direct3D / Direct2D."), L"PicoView", MB_ICONERROR);
         return 2;
     }
     pgLog("t+%.1f gfx ready (composed=%d)", (nowSec() - app.startupAt) * 1000, (int)app.gfx.composed);
