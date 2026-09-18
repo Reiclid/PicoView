@@ -443,9 +443,36 @@ static int iniInt(const wstring& f, const wchar_t* key, int def) {
     return (int)GetPrivateProfileIntW(L"PicoView", key, def, f.c_str());
 }
 
+// A UTF-8 BOM in front of "[PicoView]" makes the profile API miss the section
+// and quietly hand back every default - which is easy to hit, because Notepad
+// and PowerShell both write one. Take it off before reading.
+static void stripBom(const wstring& path) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    unsigned char bom[3] = {};
+    DWORD got = 0;
+    if (ReadFile(h, bom, 3, &got, nullptr) && got == 3 &&
+        bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF) {
+        LARGE_INTEGER size{};
+        if (GetFileSizeEx(h, &size) && size.QuadPart > 3 && size.QuadPart < (1 << 22)) {
+            std::vector<char> rest((size_t)size.QuadPart - 3);
+            DWORD read = 0;
+            if (ReadFile(h, rest.data(), (DWORD)rest.size(), &read, nullptr) && read == rest.size()) {
+                SetFilePointer(h, 0, nullptr, FILE_BEGIN);
+                DWORD wrote = 0;
+                WriteFile(h, rest.data(), read, &wrote, nullptr);
+                SetEndOfFile(h);
+            }
+        }
+    }
+    CloseHandle(h);
+}
+
 void Settings::load() {
     wstring f = file();
     if (!fileExists(f)) return;
+    stripBom(f);
     themeMode = clampi(iniInt(f, L"ThemeMode", themeMode), 0, 2);
     viewMode = clampi(iniInt(f, L"ViewMode", viewMode), 0, 1);
     thumbSize = clampi(iniInt(f, L"ThumbSize", thumbSize), 96, 420);
