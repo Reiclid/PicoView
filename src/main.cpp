@@ -1172,8 +1172,12 @@ static void stepAnimations(App& a, double dt) {
     if (a.videoMode && a.video.playing()) a.requestAnim();
 
     double idle = nowSec() - a.lastMouseMove;
+    bool keepBar = a.cfg.barHideMs < 0;           // the overlays never fade
+    // At zero the bars follow the pointer and go the moment it stops, but they
+    // still need a floor so they stay up while it is actually moving.
+    double hideAfter = std::max(a.cfg.barHideMs / 1000.0, 0.12);
     bool wantBar = (a.view == View::Viewer || a.titleOverlay()) &&
-                   (idle < 3.0 || a.hot != 0 || a.in.down || a.seekDragging ||
+                   (keepBar || idle < hideAfter || a.hot != 0 || a.in.down || a.seekDragging ||
                     a.settingsOpen || a.moreMenuOpen || a.volPopup || a.showHelp ||
                     (a.videoMode && !a.video.playing()));
     float target = wantBar ? 1.f : 0.f;
@@ -1185,8 +1189,8 @@ static void stepAnimations(App& a, double dt) {
         // Nothing else is animating once the bar is up, so the frame loop would
         // stop and the fade-out would never start. Wake up exactly when the idle
         // period runs out instead of painting continuously.
-        if (target == 1.f && a.hwnd) {
-            double left = 3.0 - idle;
+        if (target == 1.f && a.hwnd && !keepBar) {
+            double left = hideAfter - idle;
             if (left > 0) SetTimer(a.hwnd, TIMER_BARHIDE, (UINT)(left * 1000.0) + 40, nullptr);
         }
     }

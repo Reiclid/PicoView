@@ -356,6 +356,7 @@ struct Settings {
     bool     smoothing = true;
     bool     rememberZoom = true;
     bool     singleInstance = true;
+    int      barHideMs = 3000;     // idle before the overlays fade; -1 = never
     int      canvasDim = 55;       // 0..100 opacity of the photo backdrop
     int      backdrop = 3;         // 0 none, 1 mica, 2 acrylic, 3 blur-behind
     int      volume = 85;          // 0..100

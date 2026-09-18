@@ -1971,6 +1971,30 @@ static void drawSettings(App& a) {
         g.text(std::to_wstring(a.cfg.canvasDim) + L"%", g.fCaption.Get(),
                rectOf(cr.right - g.s(46.f), cr.top, g.s(46.f), rowH), a.th.textDim, DWRITE_TEXT_ALIGNMENT_TRAILING);
 
+        // Delay before the title strip and the command bar fade out. The last
+        // step past 10 s means "leave them up".
+        D2D1_RECT_F hr = setLabel(s, T(L"Приховувати панелі"),
+                                  T(L"Час бездіяльності до зникання"), rowH2);
+        const int kNever = 21;          // 0..20 -> 0.0..10.0 s, 21 -> never
+        int hidx = (a.cfg.barHideMs < 0) ? kNever
+                                         : clampi(a.cfg.barHideMs / 500, 0, kNever - 1);
+        float hv = (float)hidx / (float)kNever, houtv = hv;
+        if (slider(a, UI_SET_BASE + 35,
+                   rectOf(hr.left, hr.top + rowH2 * .5f - g.s(7.f), rw(hr) - g.s(72.f), g.s(14.f)),
+                   hv, houtv, 1.f, 4.f)) {
+            int ni = clampi((int)lround(houtv * kNever), 0, kNever);
+            a.cfg.barHideMs = (ni == kNever) ? -1 : ni * 500;
+            a.requestAnim(); touched();
+        }
+        {
+            wchar_t hb[32];
+            if (a.cfg.barHideMs < 0)       wcscpy(hb, T(L"Не ховати"));
+            else if (a.cfg.barHideMs == 0) wcscpy(hb, T(L"Одразу"));
+            else swprintf(hb, 32, T(L"%.1f с"), a.cfg.barHideMs / 1000.0);
+            g.text(hb, g.fCaption.Get(), rectOf(hr.right - g.s(66.f), hr.top, g.s(66.f), rowH2),
+                   a.th.textDim, DWRITE_TEXT_ALIGNMENT_TRAILING);
+        }
+
         if (toggleSwitch(a, UI_SET_BASE + 40,
                          setLabel(s, T(L"Стрічка кадрів"), T(L"Накладається знизу, не зменшує фото"), rowH2),
                          a.cfg.filmstrip)) {

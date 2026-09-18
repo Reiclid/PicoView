@@ -485,6 +485,7 @@ void Settings::load() {
     loopFolder = iniInt(f, L"LoopFolder", loopFolder) != 0;
     smoothing = iniInt(f, L"Smoothing", smoothing) != 0;
     singleInstance = iniInt(f, L"SingleInstance", singleInstance) != 0;
+    barHideMs = clampi(iniInt(f, L"BarHideMs", barHideMs), -1, 10000);
     canvasDim = clampi(iniInt(f, L"CanvasDim", canvasDim), 0, 100);
     backdrop = clampi(iniInt(f, L"Backdrop", backdrop), 0, 3);
     volume = clampi(iniInt(f, L"Volume", volume), 0, 100);
@@ -537,6 +538,7 @@ void Settings::save() const {
     put(L"LoopFolder", loopFolder);
     put(L"Smoothing", smoothing);
     put(L"SingleInstance", singleInstance);
+    put(L"BarHideMs", barHideMs);
     put(L"CanvasDim", canvasDim);
     put(L"Backdrop", backdrop);
     put(L"Volume", volume);
