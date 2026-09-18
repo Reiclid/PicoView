@@ -1096,10 +1096,10 @@ static void drawVideoBar(App& a) {
             a.previewAt = gotAt;
             a.previewPending = false;
         }
-        // The decoder lives on its own thread and cannot repaint us, so the
-        // frame loop has to stay awake while a request is outstanding -
-        // otherwise the frame only appeared on the next mouse move.
-        if (a.previewPending || !a.previewBmp) a.requestAnim();
+        // The decoder lives on its own thread and cannot repaint us, so while
+        // the pointer is on the track we simply keep drawing: a frame that
+        // lands is shown at once instead of waiting for the next mouse move.
+        a.requestAnim();
 
         float tw = g.s(184.f);
         float ar = 9.f / 16.f;
@@ -1130,6 +1130,15 @@ static void drawVideoBar(App& a) {
             g.pushRoundClip(ir, irr);
             g.dc->DrawBitmap(a.previewBmp.Get(), ir, cop, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
             g.popRoundClip();
+            // Seeking a big file can stall on the disk for a moment. Say so with
+            // a quiet ring instead of letting the card look frozen.
+            bool stale = a.previewAt < 0 || fabs(a.previewAt - tHover) > perPx * 6.0;
+            if (a.previewPending && stale) {
+                D2D1_POINT_2F sc{ ir.right - g.s(15.f), ir.bottom - g.s(15.f) };
+                g.dc->FillEllipse(D2D1::Ellipse(sc, g.s(11.f), g.s(11.f)),
+                                  g.solid(D2D1::ColorF(0, 0, 0, 0.45f * cop)));
+                drawSpinner(g, sc, g.s(7.f), D2D1::ColorF(1, 1, 1, cop), nowSec());
+            }
         } else {
             g.roundRect(ir, irr, alpha(a.th.card, cop));
             drawSpinner(g, D2D1::Point2F((ir.left + ir.right) * .5f, (ir.top + ir.bottom) * .5f),
@@ -2053,9 +2062,18 @@ static void drawSettings(App& a) {
         break;
     }
     default: {  // ------------------------------------------------ file types
-        g.text(T(L"Позначені формати з'являться в меню «Відкрити за допомогою»."),
-               g.fSmall.Get(), rectOf(inner.left, s.y, rw(inner), g.s(18.f)), a.th.textMute);
-        s.y += g.s(26.f);
+        // The label formats do not wrap, so the note is three short lines.
+        const wchar_t* note[] = {
+            T(L"Позначте формати й натисніть «Застосувати»."),
+            T(L"Windows 11 не дозволяє програмі самій стати стандартною."),
+            T(L"Далі натисніть «Зробити стандартною» і підтвердіть вибір у Windows."),
+        };
+        for (int i = 0; i < 3; ++i) {
+            g.text(note[i], g.fSmall.Get(), rectOf(inner.left, s.y, rw(inner), g.s(17.f)),
+                   i == 0 ? a.th.textDim : a.th.textMute);
+            s.y += g.s(17.f);
+        }
+        s.y += g.s(12.f);
 
         std::vector<size_t> popular, rest;
         for (size_t i = 0; i < a.assocAll.size(); ++i)
@@ -2083,8 +2101,8 @@ static void drawSettings(App& a) {
         textButton(a, UI_SET_BASE + 160, CMD_ASSOC_CLEAR, rectOf(bx, s.y, g.s(110.f), bh),
                    T(L"Зняти все"), nullptr, { false, true, false, false, 5.f });
         bx += g.s(118.f);
-        textButton(a, UI_SET_BASE + 170, CMD_ASSOC_WINDOWS, rectOf(bx, s.y, g.s(180.f), bh),
-                   T(L"Стандартні програми"), nullptr, { false, true, false, false, 5.f });
+        textButton(a, UI_SET_BASE + 170, CMD_ASSOC_WINDOWS, rectOf(bx, s.y, g.s(200.f), bh),
+                   T(L"Зробити стандартною"), nullptr, { false, true, false, false, 5.f });
         s.y += bh + g.s(14.f);
         break;
     }
@@ -2310,9 +2328,11 @@ void uiFrame(App& a) {
         auto entries = buildActionMenu(a, a.videoMode);
         popupMenu(a, UI_MENU_BASE, a.moreMenuAnchor, entries, a.moreMenuOpen);
     }
-    drawToast(a);
     drawSettings(a);
     drawHelp(a);
+    // Last, so a confirmation of something done inside Settings is not hidden
+    // behind the very sheet that triggered it.
+    drawToast(a);
     drawTooltip(a);
 
     a.in.pressed = a.in.released = a.in.doubleClick = false;

@@ -1018,12 +1018,17 @@ void uiOnCommand(App& a, int cmd) {
             for (const auto& e : list) { if (!joined.empty()) joined += L","; joined += e; }
             a.cfg.associations = joined;
             unregisterAssociations(a.assocAll);
-            if (!list.empty() && registerAssociations(list))
-                a.showToast(T(L"Зареєстровано форматів: ") + std::to_wstring(list.size()), 2.2);
-            else if (list.empty())
+            if (!list.empty() && registerAssociations(list)) {
+                a.assocApplied = true;
+                a.showToast(T(L"Зареєстровано форматів: ") + std::to_wstring(list.size()) +
+                            T(L". Підтвердіть у Windows"), 3.2);
+            } else if (list.empty()) {
+                a.assocApplied = false;
                 a.showToast(T(L"Реєстрацію прибрано"), 2.0);
-            else
+            } else {
                 a.showToast(T(L"Не вдалося записати в реєстр"), 2.5);
+            }
+            a.settingsDirty = false;
             a.cfg.save();
             break;
         }
@@ -1050,7 +1055,13 @@ void uiOnCommand(App& a, int cmd) {
             break;
 
         case CMD_ASSOC_WINDOWS:
-            ShellExecuteW(nullptr, L"open", L"ms-settings:defaultapps", nullptr, nullptr, SW_SHOWNORMAL);
+            // Nothing is registered yet on a first run, so write it first -
+            // otherwise the Windows page has no PicoView entry to land on.
+            if (!a.cfg.associations.empty() || a.assocApplied) openDefaultAppsPage();
+            else {
+                uiOnCommand(a, CMD_ASSOC_APPLY);
+                openDefaultAppsPage();
+            }
             break;
 
         case CMD_HELP: a.showHelp = !a.showHelp; a.invalidate(); break;

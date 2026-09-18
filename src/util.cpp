@@ -185,14 +185,24 @@ static bool regSetString(const wstring& sub, const wchar_t* name, const wstring&
 }
 
 static const wchar_t* kAppKey = L"Software\\Classes\\Applications\\PicoView.exe";
+static const wchar_t* kCapKey = L"Software\\PicoView\\Capabilities";
+
+// ProgID for one extension, e.g. ".jpg" -> "PicoView.jpg".
+static wstring progIdFor(const wstring& ext) {
+    return L"PicoView" + ext;
+}
 
 bool registerAssociations(const std::vector<wstring>& exts) {
     wstring exe = exePath();
     if (exe.empty()) return false;
+    wstring cmd = L"\"" + exe + L"\" \"%1\"";
+    wstring icon = L"\"" + exe + L"\",0";
 
+    // 1. The "Open with" entry. This part always works, no matter what the
+    //    shell decides about defaults.
     regSetString(kAppKey, L"FriendlyAppName", L"PicoView");
-    regSetString(wstring(kAppKey) + L"\\shell\\open\\command", nullptr, L"\"" + exe + L"\" \"%1\"");
-    regSetString(wstring(kAppKey) + L"\\DefaultIcon", nullptr, L"\"" + exe + L"\",0");
+    regSetString(wstring(kAppKey) + L"\\shell\\open\\command", nullptr, cmd);
+    regSetString(wstring(kAppKey) + L"\\DefaultIcon", nullptr, icon);
 
     RegDeleteTreeW(HKEY_CURRENT_USER, (wstring(kAppKey) + L"\\SupportedTypes").c_str());
     for (const auto& e : exts) {
@@ -202,17 +212,60 @@ bool registerAssociations(const std::vector<wstring>& exts) {
         if (RegCreateKeyExW(HKEY_CURRENT_USER, ow.c_str(), 0, nullptr, 0, KEY_WRITE, nullptr, &k, nullptr)
             == ERROR_SUCCESS) RegCloseKey(k);
     }
+
+    // 2. A ProgID per extension plus a Capabilities block under
+    //    RegisteredApplications. This is the only registration Windows 11
+    //    accepts: it cannot be made the default silently, but it is what puts
+    //    PicoView in Settings -> Default apps as a real entry, where one click
+    //    per type (or "Set default") hands the type over.
+    RegDeleteTreeW(HKEY_CURRENT_USER, (wstring(kCapKey) + L"\\FileAssociations").c_str());
+    regSetString(kCapKey, L"ApplicationName", L"PicoView");
+    regSetString(kCapKey, L"ApplicationDescription",
+                 T(L"Швидкий переглядач зображень і відео"));
+    regSetString(kCapKey, L"ApplicationIcon", icon);
+
+    for (const auto& e : exts) {
+        wstring prog = progIdFor(e);
+        wstring pk = L"Software\\Classes\\" + prog;
+        wstring label = e.size() > 1 ? e.substr(1) : e;
+        for (auto& c : label) if (c >= L'a' && c <= L'z') c -= 32;   // extensions are ASCII
+        regSetString(pk, nullptr, label + L" \u2014 PicoView");
+        regSetString(pk, L"FriendlyTypeName", label + L" \u2014 PicoView");
+        regSetString(pk + L"\\DefaultIcon", nullptr, icon);
+        regSetString(pk + L"\\shell\\open", L"FriendlyAppName", L"PicoView");
+        regSetString(pk + L"\\shell\\open\\command", nullptr, cmd);
+        regSetString(wstring(kCapKey) + L"\\FileAssociations", e.c_str(), prog);
+    }
+    regSetString(L"Software\\RegisteredApplications", L"PicoView", kCapKey);
+
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
     return true;
 }
 
 void unregisterAssociations(const std::vector<wstring>& allExts) {
     RegDeleteTreeW(HKEY_CURRENT_USER, kAppKey);
+    RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\PicoView");
     for (const auto& e : allExts) {
         wstring ow = L"Software\\Classes\\" + e + L"\\OpenWithList\\PicoView.exe";
         RegDeleteTreeW(HKEY_CURRENT_USER, ow.c_str());
+        RegDeleteTreeW(HKEY_CURRENT_USER, (L"Software\\Classes\\" + progIdFor(e)).c_str());
+    }
+    HKEY k = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\RegisteredApplications", 0, KEY_WRITE, &k)
+        == ERROR_SUCCESS) {
+        RegDeleteValueW(k, L"PicoView");
+        RegCloseKey(k);
     }
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+}
+
+// Opens the Windows page where the hand-over actually happens. `ext` lands on
+// the picker for that one type; empty lands on PicoView's own page.
+void openDefaultAppsPage(const wstring& ext) {
+    wstring uri = L"ms-settings:defaultapps";
+    if (!ext.empty()) uri += L"?ftprint=" + ext;
+    else              uri += L"?registeredAppUser=PicoView";
+    ShellExecuteW(nullptr, L"open", uri.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
 // ------------------------------------------------------------------ theme

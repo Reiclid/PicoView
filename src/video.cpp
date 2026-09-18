@@ -437,23 +437,41 @@ void VideoPreview::open(const wstring& path, int maxWidth) {
             reader->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
             reader->SetStreamSelection((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
 
-            ComPtr<IMFMediaType> want;
-            if (SUCCEEDED(MFCreateMediaType(&want))) {
+            // Ask the reader's own video processor for a thumbnail-sized frame.
+            // Converting and scaling 1080p to RGB32 on the CPU for every scrub
+            // step is what made a long file feel frozen; letting the pipeline
+            // hand back a small frame costs a fraction of that.
+            UINT32 nw = 0, nh = 0;
+            ComPtr<IMFMediaType> nat;
+            if (SUCCEEDED(reader->GetNativeMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &nat)))
+                MFGetAttributeSize(nat.Get(), MF_MT_FRAME_SIZE, &nw, &nh);
+
+            for (int attempt = 0; attempt < 2 && sw == 0; ++attempt) {
+                ComPtr<IMFMediaType> want;
+                if (FAILED(MFCreateMediaType(&want))) break;
                 want->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
                 want->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-                if (SUCCEEDED(reader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-                                                          nullptr, want.Get()))) {
-                    ComPtr<IMFMediaType> cur;
-                    if (SUCCEEDED(reader->GetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &cur))) {
-                        UINT32 w = 0, h = 0;
-                        MFGetAttributeSize(cur.Get(), MF_MT_FRAME_SIZE, &w, &h);
-                        sw = (int)w; sh = (int)h;
-                        UINT32 st = 0;
-                        if (SUCCEEDED(cur->GetUINT32(MF_MT_DEFAULT_STRIDE, &st)))
-                            defStride = (LONG)(INT32)st;
-                        if (defStride == 0) defStride = (LONG)w * 4;
-                    }
+                if (attempt == 0 && nw > 0 && nh > 0 && (int)nw > p->maxW) {
+                    UINT32 dw = (UINT32)(p->maxW & ~1);
+                    UINT32 dh = (UINT32)(((UINT64)nh * dw / nw) & ~1u);
+                    if (dh < 2) dh = 2;
+                    MFSetAttributeSize(want.Get(), MF_MT_FRAME_SIZE, dw, dh);
+                } else if (attempt == 0) {
+                    continue;                      // nothing to shrink, use the plain path
                 }
+                if (FAILED(reader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                                       nullptr, want.Get())))
+                    continue;
+                ComPtr<IMFMediaType> cur;
+                if (FAILED(reader->GetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &cur)))
+                    continue;
+                UINT32 w = 0, h = 0;
+                MFGetAttributeSize(cur.Get(), MF_MT_FRAME_SIZE, &w, &h);
+                sw = (int)w; sh = (int)h;
+                UINT32 st = 0;
+                if (SUCCEEDED(cur->GetUINT32(MF_MT_DEFAULT_STRIDE, &st)))
+                    defStride = (LONG)(INT32)st;
+                if (defStride == 0) defStride = (LONG)w * 4;
             }
         }
         if (sw > 0 && sh > 0) p->ready.store(true);
@@ -468,7 +486,7 @@ void VideoPreview::open(const wstring& path, int maxWidth) {
                 p->haveReq = false;
             }
             if (!reader || sw <= 0) continue;
-
+            double t0 = nowSec();
             PROPVARIANT pos;
             PropVariantInit(&pos);
             pos.vt = VT_I8;
@@ -478,9 +496,13 @@ void VideoPreview::open(const wstring& path, int maxWidth) {
 
             // A seek only lands on a key frame, so walk forward to the moment the
             // cursor is actually on - bounded, so a long GOP cannot stall this.
+            // Walking forward from the key frame is what costs the time, so it
+            // gets a budget: past it we show the frame we have. A scrub preview
+            // that is a second early beats one that never appears.
+            const double walkBudget = 0.10;
             ComPtr<IMFSample> chosen;
             LONGLONG chosenTs = 0;
-            bool abort = false;
+            bool quit = false;
             for (int guard = 0; guard < 72; ++guard) {
                 DWORD flags = 0;
                 LONGLONG ts = 0;
@@ -489,17 +511,25 @@ void VideoPreview::open(const wstring& path, int maxWidth) {
                                               nullptr, &flags, &ts, &sample)))
                     break;
                 if (flags & MF_SOURCE_READERF_ENDOFSTREAM) break;
+                if (sample) { chosen = sample; chosenTs = ts; }
+
+                // A newer request takes over the walk, but whatever has already
+                // been decoded is still a usable frame near the right moment.
+                // Dropping it was why the card froze while the pointer swept the
+                // track: every request was superseded before it produced
+                // anything, so nothing was ever published.
+                bool newer = false;
                 {
                     std::lock_guard<std::mutex> lk(p->m);
-                    if (p->quit || p->haveReq) { abort = true; break; }   // a newer request wins
+                    quit = p->quit;
+                    newer = p->haveReq;
                 }
-                if (!sample) continue;
-                chosen = sample;
-                chosenTs = ts;
+                if (quit || newer) break;
                 if ((double)ts / 1e7 >= t - 0.03) break;
+                if (chosen && nowSec() - t0 > walkBudget) break;
             }
 
-            if (!abort && chosen) {
+            if (!quit && chosen) {
                 LONGLONG ts = chosenTs;
                 ComPtr<IMFSample> sample = chosen;
                 ComPtr<IMFMediaBuffer> buf;

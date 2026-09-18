@@ -76,6 +76,9 @@ bool    dirExists(const wstring& p);
 // HKCU only: Windows 11 does not let an app make itself the default silently.
 bool    registerAssociations(const std::vector<wstring>& exts);
 void    unregisterAssociations(const std::vector<wstring>& allExts);
+// Windows 11 never lets an app make itself the default, so this opens the page
+// where the user can do it - for one extension, or PicoView's own entry.
+void    openDefaultAppsPage(const wstring& ext = wstring());
 void    pgLog(const char* fmt, ...);   // active only when PG_DEBUG=1
 
 // ---------------------------------------------------------------- theme

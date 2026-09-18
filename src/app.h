@@ -165,6 +165,7 @@ struct App {
     std::vector<wstring>        assocAll;
     std::unordered_set<wstring> assocSel;
     bool   assocLoaded = false;
+    bool   assocApplied = false;    // registry written at least once this run
     bool   moreMenuOpen = false;
     D2D1_RECT_F moreMenuAnchor{};
     D2D1_RECT_F moreMenuBounds{};
