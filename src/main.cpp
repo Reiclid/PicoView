@@ -207,7 +207,9 @@ static float fitZoomFor(App& a) {
     if (!a.sourceSize(sw, sh)) return 1.f;
     float w = (float)sw, h = (float)sh;
     if (a.rot & 1) std::swap(w, h);
-    float inset = (a.cfg.autoSize == 2 || a.fullscreen) ? 0.f : a.gfx.s(24.f);
+    // Both auto-fit modes put the picture right up against the edges; only a
+    // hand-driven "fit to window" keeps a margin.
+    float inset = (a.cfg.autoSize != 0 || a.fullscreen) ? 0.f : a.gfx.s(24.f);
     float cw = std::max(1.f, a.R.canvas.right - a.R.canvas.left - inset);
     float ch = std::max(1.f, a.R.canvas.bottom - a.R.canvas.top - inset);
     float k = std::min(cw / w, ch / h);
@@ -1568,7 +1570,9 @@ static void onWheel(App& a, int delta, POINT ptClient) {
     bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     a.lastMouseMove = nowSec();
 
-    if (a.compOpen) {
+    // Only while the pointer is actually on the panel; over the canvas the
+    // wheel still zooms, which is the whole point of previewing there.
+    if (a.compOpen && a.R.comp.right - a.R.comp.left > 1.f && ptClient.x >= a.R.comp.left) {
         a.compScroll = clampf(a.compScroll - delta * a.gfx.s(0.9f), 0.f, a.compScrollMax);
         a.invalidate();
         return;

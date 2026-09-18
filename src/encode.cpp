@@ -477,40 +477,34 @@ static void runJob(Compressor::Impl* p, const CompressJob& job, CompressResult& 
         if (bytes.empty() || bytes.size() > target) {
             if (job.allowDownscale) {
                 float q = f.quality ? 0.72f : 1.f;
-                float slo = 0.05f, shi = useScale;
+                float slo = 0.02f, shi = useScale;
 
-                // At a fixed quality the file grows roughly with the pixel count,
-                // so one cheap encode of the proxy says about where to look, and
-                // the bracket can start narrow instead of at the whole range.
+                // At a fixed quality the file grows roughly with the pixel
+                // count, so one cheap encode of the proxy says about where to
+                // look. It only pulls the *upper* bound down: narrowing the
+                // bottom as well used to leave the true answer outside the
+                // bracket, and the search then found nothing at all.
                 if (proxy.valid() && !aborted()) {
                     std::vector<uint8_t> t;
                     if (encodeToBytes(proxy, f, useAlpha, q, proxy.w, proxy.h, t) && !t.empty()) {
                         double perPx = (double)t.size() / proxyPx;
                         double wantPx = target / std::max(1e-9, perPx);
-                        float seed = (float)sqrt(clampf((float)(wantPx / fullPx), 0.0025f, 1.f));
-                        slo = clampf(seed * 0.55f, 0.05f, useScale);
-                        shi = clampf(seed * 1.6f, slo + 0.02f, useScale);
+                        float seed = (float)sqrt(clampf((float)(wantPx / fullPx), 0.0004f, 1.f));
+                        shi = clampf(seed * 2.2f, slo + 0.02f, useScale);
                     }
                 }
 
                 std::vector<uint8_t> best;
                 float bestS = slo;
-                for (int pass = 0; pass < 2 && best.empty() && !aborted(); ++pass) {
-                    float a0 = slo, b0 = shi;
-                    for (int i = 0; i < 5 && !aborted(); ++i) {
-                        float mid = (a0 + b0) * .5f;
-                        int tw, th;
-                        sized(mid, tw, th);
-                        std::vector<uint8_t> trial;
-                        if (!encodeToBytes(src, f, useAlpha, q, tw, th, trial)) break;
-                        if (trial.size() <= target) { best.swap(trial); bestS = mid; a0 = mid; }
-                        else b0 = mid;
-                        if (b0 - a0 < 0.01f) break;
-                    }
-                    // The seeded bracket was too optimistic: look below it.
-                    shi = slo;
-                    slo = 0.05f;
-                    if (shi <= 0.06f) break;
+                for (int i = 0; i < 7 && !aborted(); ++i) {
+                    float mid = (slo + shi) * .5f;
+                    int tw, th;
+                    sized(mid, tw, th);
+                    std::vector<uint8_t> trial;
+                    if (!encodeToBytes(src, f, useAlpha, q, tw, th, trial)) break;
+                    if (trial.size() <= target) { best.swap(trial); bestS = mid; slo = mid; }
+                    else shi = mid;
+                    if (shi - slo < 0.008f) break;
                 }
                 if (!best.empty()) {
                     bytes.swap(best);
@@ -520,10 +514,18 @@ static void runJob(Compressor::Impl* p, const CompressJob& job, CompressResult& 
                 }
             }
             if (bytes.empty()) {
-                // Nothing fit: show the smallest we could make and say so.
+                // Nothing reached the target. Hand back the smallest we can
+                // actually make and say so - falling back to the original size
+                // produced a file larger than the source while claiming it was
+                // as small as it goes.
                 float q = f.quality ? 0.03f : 1.f;
-                if (!encodeToBytes(src, f, useAlpha, q, w, h, bytes)) { res.error = T(L"Не вдалося закодувати"); return; }
+                float s = job.allowDownscale ? 0.02f : useScale;
+                int tw, th;
+                sized(s, tw, th);
+                if (!encodeToBytes(src, f, useAlpha, q, tw, th, bytes)) { res.error = T(L"Не вдалося закодувати"); return; }
                 useQ = q;
+                useScale = s;
+                w = tw; h = th;
             }
             res.missedTarget = bytes.size() > target;
         }

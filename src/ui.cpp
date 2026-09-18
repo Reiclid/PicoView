@@ -2038,7 +2038,7 @@ static void drawCompressor(App& a) {
         }
         if (r.missedTarget) {
             g.text(T(L"Менше зробити не вдалося"), g.fSmall.Get(),
-                   rectOf(col.left, y, rw(col), rowH * 2), a.th.danger);
+                   rectOf(col.left, y, rw(col), rowH), a.th.danger);
             y += rowH + g.s(4.f);
         }
     } else if (!a.compStatus.empty()) {
