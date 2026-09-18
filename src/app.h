@@ -171,6 +171,17 @@ struct App {
     D2D1_RECT_F moreMenuAnchor{};
     D2D1_RECT_F moreMenuBounds{};
     float  menuScroll = 0, menuScrollMax = 0;
+    // ---- crop
+    // The rectangle lives in source-image pixels, so it survives zoom, pan,
+    // rotation and mirroring without being recomputed.
+    bool   cropMode = false;        // picking the rectangle right now
+    bool   cropActive = false;      // a crop is applied to what you see
+    D2D1_RECT_F cropRect{};
+    int    cropDrag = -1;           // -1 none, 0..7 handles, 8 whole rectangle
+    D2D1_POINT_2F cropGrabAt{};
+    D2D1_RECT_F   cropGrabRect{};
+    int    cropAspect = 0;          // 0 free, else index into the preset list
+
     // ---- compressor / converter
     Compressor   comp;
     bool         compOpen = false;
@@ -241,6 +252,11 @@ struct App {
     void autoSizeWindow();             // AutoSize == 2: window follows the picture
     void rememberView();               // stash the current zoom/orientation
     void takePendingView();            // apply a stashed one after the fit
+    void cropBegin();
+    void cropApply();
+    void cropCancel();
+    void cropReset();
+    bool cropSize(int& w, int& h) const;   // the picture as cropped
     void openCompressor(bool on);
     void compressRequest(bool now = false);
     CompressJob compressJob(const wstring& path, const wstring& outPath) const;

@@ -59,6 +59,8 @@ namespace ico {
     static const wchar_t* Pin = L"";
     static const wchar_t* Unpin = L"";
     static const wchar_t* Compress = L"";
+    static const wchar_t* Crop = L"";
+    static const wchar_t* Reset = L"";
 }
 
 // --------------------------------------------------------------- frame-local
@@ -160,7 +162,8 @@ enum UiId {
     UI_MENU_BASE = 1800,
     UI_SET_BASE = 2000,
     UI_ASSOC_BASE = 2400,
-    UI_COMP_BASE = 2600
+    UI_COMP_BASE = 2600,
+    UI_CROP_BASE = 2700
 };
 
 // --------------------------------------------------------------- widgets
@@ -500,6 +503,8 @@ static std::vector<MenuEntry> buildActionMenu(App& a, bool forVideo) {
     add(CMD_FILMSTRIP, ico::Film, T(L"Стрічка кадрів"), L"T", a.cfg.filmstrip, a.folder.count() > 1);
     add(CMD_INFO, ico::Info, T(L"Відомості"), L"I", a.cfg.infoPanel);
     sep();
+    if (!forVideo) add(CMD_CROP, ico::Crop, T(L"Обрізати"), L"X", a.cropMode || a.cropActive, has);
+    if (!forVideo && a.cropActive) add(CMD_CROP_RESET, ico::Reset, T(L"Скинути обрізання"), nullptr);
     if (!forVideo) add(CMD_COMPRESS, ico::Compress, T(L"Стиснути та конвертувати"), L"Ctrl+E", false, has);
     if (!forVideo) add(CMD_COPY, ico::Copy, T(L"Копіювати"), L"Ctrl+C", false, has);
     add(CMD_REVEAL, ico::Reveal, T(L"Показати в провіднику"), nullptr);
@@ -632,6 +637,9 @@ static void drawTitlebar(App& a) {
         title = a.folder.at(a.index).name;
         if (pic && !pic->failed && pic->srcW > 0) {
             sub = std::to_wstring(pic->srcW) + L" × " + std::to_wstring(pic->srcH);
+            int cw2 = 0, chh = 0;
+            if (a.cropSize(cw2, chh))
+                sub += L" → " + std::to_wstring(cw2) + L" × " + std::to_wstring(chh);
             if (pic->fileSize) sub += L"  ·  " + humanSize(pic->fileSize);
             if (a.folder.count() > 1) sub += L"  ·  " + std::to_wstring(a.index + 1) + L"/" + std::to_wstring(a.folder.count());
         }
@@ -895,8 +903,20 @@ static void drawImage(App& a) {
     // over exactly the area the original would cover, so the comparison is like
     // for like even when the output has fewer pixels.
     ID2D1Bitmap1* shown = pic->bmp.Get();
-    if (a.compOpen && a.compBmp && !a.compCompare) shown = a.compBmp.Get();
+    bool fromCompressor = a.compOpen && a.compBmp && !a.compCompare;
+    if (fromCompressor) shown = a.compBmp.Get();
     float shownW = shown->GetSize().width;
+
+    // An applied crop is drawn by taking that part of the bitmap; the
+    // compressor's own preview already arrives cropped.
+    D2D1_RECT_F sub{};
+    bool useSub = false;
+    if (a.cropActive && !a.cropMode && !fromCompressor) {
+        float k = (float)pic->w / std::max(1, pic->srcW);
+        sub = { a.cropRect.left * k, a.cropRect.top * k,
+                a.cropRect.right * k, a.cropRect.bottom * k };
+        useSub = true;
+    }
 
     float effective = a.zoom * (shownW / srcW);      // bitmap texel -> screen pixel
     D2D1_INTERPOLATION_MODE mode;
@@ -907,7 +927,7 @@ static void drawImage(App& a) {
 
     g.dc->SetTransform(m);
     float op = clampf(a.fadeIn, 0.f, 1.f);
-    g.dc->DrawBitmap(shown, rectOf(0, 0, srcW, srcH), op, mode, nullptr, nullptr);
+    g.dc->DrawBitmap(shown, rectOf(0, 0, srcW, srcH), op, mode, useSub ? &sub : nullptr, nullptr);
     g.dc->SetTransform(D2D1::Matrix3x2F::Identity());
     g.dc->PopAxisAlignedClip();
 
@@ -915,6 +935,163 @@ static void drawImage(App& a) {
         drawSpinner(g, D2D1::Point2F(cv.right - g.s(30.f), cv.top + g.s(30.f)), g.s(8.f), a.th.textDim, nowSec());
         a.requestAnim();
     }
+}
+
+// ------------------------------------------------------------------- crop
+// The rectangle is kept in source-image pixels, so the screen transform is
+// built once here and used both ways: corners out to draw, pointer back in to
+// edit. That way rotation and mirroring need no special handling at all.
+static D2D1::Matrix3x2F cropToScreen(App& a, float srcW, float srcH) {
+    D2D1_RECT_F cv = a.R.canvas;
+    D2D1::Matrix3x2F m = D2D1::Matrix3x2F::Translation(-srcW * .5f, -srcH * .5f);
+    m = m * D2D1::Matrix3x2F::Scale(a.zoom, a.zoom);
+    if (a.rot) m = m * D2D1::Matrix3x2F::Rotation(a.rot * 90.f);
+    if (a.flipH) m = m * D2D1::Matrix3x2F::Scale(-1.f, 1.f);
+    if (a.flipV) m = m * D2D1::Matrix3x2F::Scale(1.f, -1.f);
+    m = m * D2D1::Matrix3x2F::Translation((cv.left + cv.right) * .5f + a.panX,
+                                          (cv.top + cv.bottom) * .5f + a.panY);
+    return m;
+}
+
+static void drawCrop(App& a) {
+    if (!a.cropMode) return;
+    Gfx& g = a.gfx;
+    auto pic = a.current();
+    if (!pic || pic->srcW <= 0) return;
+
+    float srcW = (float)pic->srcW, srcH = (float)pic->srcH;
+    D2D1::Matrix3x2F m = cropToScreen(a, srcW, srcH);
+    D2D1::Matrix3x2F inv = m;
+    if (!inv.Invert()) return;
+
+    auto toScreen = [&](float x, float y) {
+        D2D1_POINT_2F p = m.TransformPoint(D2D1::Point2F(x, y));
+        return p;
+    };
+    auto toSource = [&](D2D1_POINT_2F p) { return inv.TransformPoint(p); };
+
+    // The four corners of the selection on screen; with rotation this is not an
+    // axis-aligned box, so the screen-space bounds are taken from the corners.
+    D2D1_POINT_2F c0 = toScreen(a.cropRect.left, a.cropRect.top);
+    D2D1_POINT_2F c1 = toScreen(a.cropRect.right, a.cropRect.top);
+    D2D1_POINT_2F c2 = toScreen(a.cropRect.right, a.cropRect.bottom);
+    D2D1_POINT_2F c3 = toScreen(a.cropRect.left, a.cropRect.bottom);
+    D2D1_RECT_F box{ std::min(std::min(c0.x, c1.x), std::min(c2.x, c3.x)),
+                     std::min(std::min(c0.y, c1.y), std::min(c2.y, c3.y)),
+                     std::max(std::max(c0.x, c1.x), std::max(c2.x, c3.x)),
+                     std::max(std::max(c0.y, c1.y), std::max(c2.y, c3.y)) };
+
+    // Dim everything outside the selection.
+    D2D1_RECT_F cv = a.R.canvas;
+    D2D1_COLOR_F veil = D2D1::ColorF(0, 0, 0, 0.55f);
+    g.dc->FillRectangle(rectOf(cv.left, cv.top, rw(cv), std::max(0.f, box.top - cv.top)), g.solid(veil));
+    g.dc->FillRectangle(rectOf(cv.left, box.bottom, rw(cv), std::max(0.f, cv.bottom - box.bottom)), g.solid(veil));
+    g.dc->FillRectangle(rectOf(cv.left, box.top, std::max(0.f, box.left - cv.left),
+                               std::max(0.f, box.bottom - box.top)), g.solid(veil));
+    g.dc->FillRectangle(rectOf(box.right, box.top, std::max(0.f, cv.right - box.right),
+                               std::max(0.f, box.bottom - box.top)), g.solid(veil));
+
+    // Frame, thirds, handles.
+    D2D1_COLOR_F line = D2D1::ColorF(1, 1, 1, 0.95f);
+    g.dc->DrawRectangle(box, g.solid(line), g.s(1.4f));
+    for (int i = 1; i <= 2; ++i) {
+        float fx = box.left + (box.right - box.left) * i / 3.f;
+        float fy = box.top + (box.bottom - box.top) * i / 3.f;
+        g.dc->DrawLine(D2D1::Point2F(fx, box.top), D2D1::Point2F(fx, box.bottom),
+                       g.solid(alpha(line, 0.35f)), g.s(1.f));
+        g.dc->DrawLine(D2D1::Point2F(box.left, fy), D2D1::Point2F(box.right, fy),
+                       g.solid(alpha(line, 0.35f)), g.s(1.f));
+    }
+
+    float hs = g.s(9.f);
+    D2D1_POINT_2F hp[8];
+    float mx = (box.left + box.right) * .5f, my = (box.top + box.bottom) * .5f;
+    hp[0] = D2D1::Point2F(box.left, box.top);   hp[1] = D2D1::Point2F(mx, box.top);
+    hp[2] = D2D1::Point2F(box.right, box.top);  hp[3] = D2D1::Point2F(box.right, my);
+    hp[4] = D2D1::Point2F(box.right, box.bottom); hp[5] = D2D1::Point2F(mx, box.bottom);
+    hp[6] = D2D1::Point2F(box.left, box.bottom); hp[7] = D2D1::Point2F(box.left, my);
+    for (int i = 0; i < 8; ++i) {
+        D2D1_RECT_F h = rectOf(hp[i].x - hs * .5f, hp[i].y - hs * .5f, hs, hs);
+        g.roundRect(h, g.s(2.f), D2D1::ColorF(1, 1, 1, 0.98f));
+        g.roundRectStroke(h, g.s(2.f), D2D1::ColorF(0, 0, 0, 0.45f), g.s(1.f));
+    }
+
+    // ---------------- interaction
+    static const LPCWSTR curs[8] = { IDC_SIZENWSE, IDC_SIZENS, IDC_SIZENESW, IDC_SIZEWE,
+                                     IDC_SIZENWSE, IDC_SIZENS, IDC_SIZENESW, IDC_SIZEWE };
+    bool overCanvas = a.in.hasMouse && inRect(cv, a.in.mouse);
+    int hot = -1;
+    if (overCanvas && a.cropDrag < 0) {
+        float grab = g.s(11.f);
+        for (int i = 0; i < 8; ++i) {
+            if (fabsf(a.in.mouse.x - hp[i].x) <= grab && fabsf(a.in.mouse.y - hp[i].y) <= grab) { hot = i; break; }
+        }
+        if (hot < 0 && inRect(box, a.in.mouse)) hot = 8;
+    }
+    int shown = a.cropDrag >= 0 ? a.cropDrag : hot;
+    if (shown >= 0 && shown < 8) useCursor(a, curs[shown]);
+    else if (shown == 8)         useCursor(a, IDC_SIZEALL);
+
+    if (overCanvas && a.in.pressed && hot >= 0) {
+        a.cropDrag = hot;
+        a.cropGrabAt = toSource(a.in.mouse);
+        a.cropGrabRect = a.cropRect;
+        g_overUi = true;
+    }
+    if (a.cropDrag >= 0 && a.in.down) {
+        D2D1_POINT_2F p = toSource(a.in.mouse);
+        float dx = p.x - a.cropGrabAt.x, dy = p.y - a.cropGrabAt.y;
+        D2D1_RECT_F r = a.cropGrabRect;
+        const float minSide = 8.f;
+
+        if (a.cropDrag == 8) {
+            float w = r.right - r.left, h = r.bottom - r.top;
+            r.left = clampf(r.left + dx, 0.f, srcW - w);
+            r.top = clampf(r.top + dy, 0.f, srcH - h);
+            r.right = r.left + w;
+            r.bottom = r.top + h;
+        } else {
+            // Handles are numbered clockwise from the top-left corner.
+            bool west  = (a.cropDrag == 0 || a.cropDrag == 6 || a.cropDrag == 7);
+            bool east  = (a.cropDrag == 2 || a.cropDrag == 3 || a.cropDrag == 4);
+            bool north = (a.cropDrag == 0 || a.cropDrag == 1 || a.cropDrag == 2);
+            bool south = (a.cropDrag == 4 || a.cropDrag == 5 || a.cropDrag == 6);
+            if (west)  r.left = clampf(r.left + dx, 0.f, r.right - minSide);
+            if (east)  r.right = clampf(r.right + dx, r.left + minSide, srcW);
+            if (north) r.top = clampf(r.top + dy, 0.f, r.bottom - minSide);
+            if (south) r.bottom = clampf(r.bottom + dy, r.top + minSide, srcH);
+        }
+        if (r.left != a.cropRect.left || r.top != a.cropRect.top ||
+            r.right != a.cropRect.right || r.bottom != a.cropRect.bottom) {
+            a.cropRect = r;
+            a.invalidate();
+        }
+        g_overUi = true;
+    }
+    if (a.in.released) a.cropDrag = -1;
+    if (overCanvas) g_overUi = true;      // never start a pan while cropping
+
+    // ---------------- toolbar
+    float bw = g.s(96.f), bh = g.s(34.f), gap = g.s(8.f);
+    float total = bw * 2 + gap;
+    float bx = (cv.left + cv.right - total) * .5f;
+    float by = cv.bottom - bh - g.s(96.f);
+    D2D1_RECT_F pill = rectOf(bx - g.s(12.f), by - g.s(10.f), total + g.s(24.f), bh + g.s(20.f));
+    shadowPill(g, pill, g.s(10.f), a.th.shadow, 1.f);
+    g.roundRect(pill, g.s(10.f), alpha(a.th.bar, 0.98f));
+    g.roundRectStroke(pill, g.s(10.f), a.th.barStroke, g.s(1.f));
+
+    textButton(a, UI_CROP_BASE, CMD_CROP_APPLY, rectOf(bx, by, bw, bh),
+               T(L"Обрізати"), T(L"Enter"), { false, true, false, true, 5.f });
+    textButton(a, UI_CROP_BASE + 1, CMD_CROP_CANCEL, rectOf(bx + bw + gap, by, bw, bh),
+               T(L"Скасувати"), T(L"Esc"), { false, true, false, false, 5.f });
+
+    wchar_t info[64];
+    swprintf(info, 64, L"%d × %d",
+             (int)lround(a.cropRect.right - a.cropRect.left),
+             (int)lround(a.cropRect.bottom - a.cropRect.top));
+    g.text(info, g.fCaption.Get(), rectOf(pill.left, pill.top - g.s(24.f), rw(pill), g.s(20.f)),
+           D2D1::ColorF(1, 1, 1, 0.9f), DWRITE_TEXT_ALIGNMENT_CENTER);
 }
 
 // --------------------------------------------------------------- command bar
@@ -2519,14 +2696,14 @@ static void drawHelp(App& a) {
         { L"H  /  V",           T(L"Дзеркально по горизонталі / вертикалі") },
         { L"I",                 T(L"Панель відомостей") },
         { L"T",                 T(L"Стрічка кадрів") },
+        { L"X",                 T(L"Обрізати") },
+        { L"Ctrl+E",            T(L"Стиснути та конвертувати") },
         { L"Ctrl+C",            T(L"Копіювати зображення") },
         { L"Ctrl+O",            T(L"Відкрити файл") },
         { L"Ctrl+N",            T(L"Відкрити нове вікно") },
         { L"Ctrl+,",            T(L"Налаштування") },
         { L"P",                 T(L"Закріпити поверх усіх вікон") },
         { L"Delete",            T(L"Перемістити в кошик") },
-        { L"P",                 T(L"Закріпити поверх усіх вікон") },
-        { L"Ctrl+N  /  Ctrl+,", T(L"Нове вікно / налаштування") },
         { L"F1",                T(L"Ця довідка") },
     };
     const HelpRow* list = a.videoMode ? videoRows : rows;
@@ -2627,6 +2804,7 @@ void uiFrame(App& a) {
 
     if (a.view == View::Viewer) {
         drawImage(a);
+        drawCrop(a);
         canvasInput(a);
         drawFilmstrip(a);
         if (a.videoMode) drawVideoBar(a); else drawCommandBar(a);

@@ -185,6 +185,7 @@ struct CompressJob {
     float        scale = 1.f;      // output pixels, 0.05..1 of the original
     double       target = 0;       // bytes (TargetBytes) or 0..1 share (Percent)
     bool         allowDownscale = true;   // shrink if quality alone cannot reach it
+    int          cropX = 0, cropY = 0, cropW = 0, cropH = 0;   // 0 size => whole picture
     int          previewMax = 1400;       // preview long edge; 0 => skip the preview
     int          batchIndex = 0, batchTotal = 0;
 };
@@ -485,5 +486,6 @@ enum {
     CMD_AUTOSIZE, CMD_MORE, CMD_SETTINGS, CMD_NEWWINDOW, CMD_ASSOC_APPLY,
     CMD_ASSOC_CLEAR, CMD_ASSOC_WINDOWS, CMD_ASSOC_POPULAR, CMD_PIN,
     CMD_ESCAPE, CMD_PRINT, CMD_HELP, CMD_ROTATE_SAVE,
-    CMD_COMPRESS, CMD_COMP_SAVE, CMD_COMP_SAVEAS, CMD_COMP_BATCH, CMD_COMP_CANCEL
+    CMD_COMPRESS, CMD_COMP_SAVE, CMD_COMP_SAVEAS, CMD_COMP_BATCH, CMD_COMP_CANCEL,
+    CMD_CROP, CMD_CROP_APPLY, CMD_CROP_CANCEL, CMD_CROP_RESET
 };

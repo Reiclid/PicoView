@@ -187,6 +187,10 @@ bool App::sourceSize(int& w, int& h) {
     if (videoMode) { w = video.width(); h = video.height(); return w > 0 && h > 0; }
     auto pic = current();
     if (!pic || pic->srcW <= 0) return false;
+    // While the rectangle is being picked the whole picture has to stay
+    // visible; once applied, the crop *is* the picture as far as fitting,
+    // panning and the window size are concerned.
+    if (cropActive && !cropMode && cropSize(w, h)) return true;
     w = pic->srcW; h = pic->srcH;
     return true;
 }
@@ -436,6 +440,9 @@ void App::goTo(int newIndex, bool resetView) {
     loader.bumpGeneration();
     // With the compressor open the canvas is a preview of this file; a different
     // file needs its own, and the old numbers must not linger.
+    cropMode = false;
+    cropActive = false;
+    cropDrag = -1;
     if (compOpen) {
         compHasResult = false;
         compBmp.Reset();
@@ -733,6 +740,70 @@ void App::openFolderDialog() {
     }
 }
 
+// ------------------------------------------------------------------- crop
+bool App::cropSize(int& w, int& h) const {
+    if (!cropActive) return false;
+    w = std::max(1, (int)lround(cropRect.right - cropRect.left));
+    h = std::max(1, (int)lround(cropRect.bottom - cropRect.top));
+    return true;
+}
+
+void App::cropBegin() {
+    if (videoMode) { showToast(T(L"Обрізати можна лише зображення")); return; }
+    auto pic = current();
+    if (!pic || !pic->bmp || pic->failed || pic->srcW <= 0) return;
+
+    if (!cropActive) {
+        // Start from the whole picture rather than an empty selection, so the
+        // first drag adjusts an edge instead of having to draw a box first.
+        cropRect = { 0.f, 0.f, (float)pic->srcW, (float)pic->srcH };
+    }
+    cropMode = true;
+    cropDrag = -1;
+    settingsOpen = moreMenuOpen = showHelp = false;
+    applyFit(true);
+    invalidate();
+}
+
+void App::cropApply() {
+    if (!cropMode) return;
+    auto pic = current();
+    if (!pic || pic->srcW <= 0) { cropMode = false; return; }
+
+    float w = cropRect.right - cropRect.left, h = cropRect.bottom - cropRect.top;
+    cropMode = false;
+    // A selection that is the whole picture is not a crop at all.
+    cropActive = (w >= 8.f && h >= 8.f &&
+                  (w < pic->srcW - 0.5f || h < pic->srcH - 0.5f));
+    fitMode = (cfg.autoSize == 0) ? Fit::Actual : Fit::Window;
+    panX = panY = panTargetX = panTargetY = 0;
+    autoSizeWindow();
+    applyFit(true);
+    if (compOpen) compressRequest(true);
+    needRelayout = true;
+    invalidate();
+}
+
+void App::cropCancel() {
+    cropMode = false;
+    cropDrag = -1;
+    applyFit(true);
+    invalidate();
+}
+
+void App::cropReset() {
+    if (!cropActive && !cropMode) return;
+    cropActive = false;
+    cropMode = false;
+    cropDrag = -1;
+    panX = panY = panTargetX = panTargetY = 0;
+    autoSizeWindow();
+    applyFit(true);
+    if (compOpen) compressRequest(true);
+    needRelayout = true;
+    invalidate();
+}
+
 // ------------------------------------------------------------- compressor
 void App::openCompressor(bool on) {
     if (on) {
@@ -782,6 +853,12 @@ CompressJob App::compressJob(const wstring& path, const wstring& outPath) const 
     j.allowDownscale = compDownscale;
     if (compMode == CompressMode::Percent)          j.target = compPercent;
     else if (compMode == CompressMode::TargetBytes) j.target = compTargetMB * 1024.0 * 1024.0;
+    if (cropActive) {
+        j.cropX = (int)lround(cropRect.left);
+        j.cropY = (int)lround(cropRect.top);
+        j.cropW = (int)lround(cropRect.right - cropRect.left);
+        j.cropH = (int)lround(cropRect.bottom - cropRect.top);
+    }
     j.previewMax = outPath.empty() ? 2600 : 0;   // the canvas shows it full size
     return j;
 }
@@ -1290,6 +1367,11 @@ void uiOnCommand(App& a, int cmd) {
             }
             break;
 
+        case CMD_CROP:         a.cropMode ? a.cropCancel() : a.cropBegin(); break;
+        case CMD_CROP_APPLY:   a.cropApply(); break;
+        case CMD_CROP_CANCEL:  a.cropCancel(); break;
+        case CMD_CROP_RESET:   a.cropReset(); break;
+
         case CMD_COMPRESS:     a.openCompressor(!a.compOpen); break;
         case CMD_COMP_SAVE:    a.compressSave(false); break;
         case CMD_COMP_SAVEAS:  a.compressSave(true); break;
@@ -1298,7 +1380,8 @@ void uiOnCommand(App& a, int cmd) {
 
         case CMD_HELP: a.showHelp = !a.showHelp; a.invalidate(); break;
         case CMD_ESCAPE:
-            if (a.compOpen) a.openCompressor(false);
+            if (a.cropMode) a.cropCancel();
+            else if (a.compOpen) a.openCompressor(false);
             else if (a.settingsOpen) a.settingsOpen = false;
             else if (a.moreMenuOpen || a.sortMenuOpen) { a.moreMenuOpen = a.sortMenuOpen = false; }
             else if (a.showHelp) a.showHelp = false;
@@ -1548,6 +1631,7 @@ static void onKey(App& a, WPARAM key) {
         case 'H': uiOnCommand(a, CMD_FLIP_H); break;
         case 'V': uiOnCommand(a, CMD_FLIP_V); break;
         case 'A': uiOnCommand(a, CMD_AUTOSIZE); break;
+        case 'X': uiOnCommand(a, CMD_CROP); break;
         case 'P': uiOnCommand(a, CMD_PIN); break;
         case 'W': a.cfg.wheelMode = 1 - a.cfg.wheelMode;
                   a.showToast(a.cfg.wheelMode ? T(L"Колесо: гортання") : T(L"Колесо: масштаб")); break;
@@ -1556,7 +1640,8 @@ static void onKey(App& a, WPARAM key) {
             if (a.view == View::Viewer) uiOnCommand(a, CMD_SLIDESHOW);
             break;
         case VK_RETURN:
-            if (a.view == View::Grid) a.setView(View::Viewer);
+            if (a.cropMode) a.cropApply();
+            else if (a.view == View::Grid) a.setView(View::Viewer);
             break;
         case VK_F1: uiOnCommand(a, CMD_HELP); break;
         case VK_ESCAPE: uiOnCommand(a, CMD_ESCAPE); break;

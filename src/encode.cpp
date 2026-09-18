@@ -384,8 +384,28 @@ static void runJob(Compressor::Impl* p, const CompressJob& job, CompressResult& 
     PixelBuf src;
     int nativeW = 0, nativeH = 0;
     if (!loadSource(job.path, src, nativeW, nativeH, res.error)) return;
+    // "Before" is the file you started from, so it keeps the native size; the
+    // crop only describes what is being written.
     res.srcW = src.w;
     res.srcH = src.h;
+
+    // Cropping happens before anything else, so every size the panel reports
+    // afterwards is the size of what will actually be written.
+    if (job.cropW > 0 && job.cropH > 0) {
+        int x0 = clampi(job.cropX, 0, std::max(0, src.w - 1));
+        int y0 = clampi(job.cropY, 0, std::max(0, src.h - 1));
+        int cw = clampi(job.cropW, 1, src.w - x0);
+        int chh = clampi(job.cropH, 1, src.h - y0);
+        if (cw != src.w || chh != src.h) {
+            PixelBuf cut;
+            cut.w = cw; cut.h = chh;
+            cut.px.resize((size_t)cw * chh * 4);
+            for (int row = 0; row < chh; ++row)
+                memcpy(&cut.px[(size_t)row * cw * 4],
+                       &src.px[((size_t)(y0 + row) * src.w + x0) * 4], (size_t)cw * 4);
+            src = std::move(cut);
+        }
+    }
     const bool useAlpha = f.alpha && hasRealAlpha(src);
     if (!useAlpha) flattenOntoWhite(src);
 
