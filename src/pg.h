@@ -46,6 +46,7 @@ using std::wstring;
 #define WM_PG_SCANNED   (WM_APP + 2)   // a folder scan finished
 #define WM_PG_ANIM      (WM_APP + 3)
 #define WM_PG_VIDEO     (WM_APP + 4)   // media engine event
+#define WM_PG_COMPRESS  (WM_APP + 5)   // a compress/convert job finished
 
 // ---------------------------------------------------------------- language
 enum { LANG_UK = 0, LANG_EN = 1, LANG_RU = 2 };
@@ -153,6 +154,77 @@ bool     decodeIsSupported(const wstring& ext);
 const std::vector<wstring>& decodeExtensions();
 wstring  decodeFilterString();                       // for GetOpenFileName
 void     runDecodeJob(const DecodeJob& job, DecodeResult& out, const std::atomic<uint64_t>& liveGen);
+
+// ---------------------------------------------------------------- encoding
+// The formats this machine can actually write. Probed once, on first use: the
+// list depends on which codec packs are installed, and HEIF in particular is
+// enumerated even when its encoder cannot be created.
+struct EncFormat {
+    wstring ext;              // ".jpg"
+    wstring name;             // "JPEG"
+    GUID    container{};
+    bool    quality = false;  // honours an ImageQuality setting
+    bool    alpha = false;    // can carry transparency
+};
+const std::vector<EncFormat>& encodeFormats();
+int encodeFormatFor(const wstring& ext);     // index, or -1
+
+enum class CompressMode {
+    Quality,       // the user picks the encoder quality directly
+    Percent,       // aim for a share of the original file size
+    TargetBytes    // aim for an absolute file size
+};
+
+struct CompressJob {
+    uint64_t     id = 0;
+    wstring      path;             // source file
+    wstring      outPath;          // empty => preview only, nothing is written
+    int          format = 0;       // index into encodeFormats()
+    CompressMode mode = CompressMode::Quality;
+    float        quality = 0.82f;
+    float        scale = 1.f;      // output pixels, 0.05..1 of the original
+    double       target = 0;       // bytes (TargetBytes) or 0..1 share (Percent)
+    bool         allowDownscale = true;   // shrink if quality alone cannot reach it
+    int          previewMax = 1400;       // preview long edge; 0 => skip the preview
+    int          batchIndex = 0, batchTotal = 0;
+};
+
+struct CompressResult {
+    uint64_t id = 0;
+    bool     ok = false;
+    wstring  error;
+    wstring  path, outPath;
+    uint64_t srcBytes = 0;
+    int      srcW = 0, srcH = 0;
+    uint64_t outBytes = 0;
+    int      outW = 0, outH = 0;
+    float    usedQuality = 0;
+    float    usedScale = 1.f;
+    bool     missedTarget = false;   // smallest achievable is still over the target
+    bool     saved = false;
+    PixelBuf preview;                // decoded back from the bytes actually written
+    double   ms = 0;
+    int      batchIndex = 0, batchTotal = 0;
+};
+
+// One worker thread. Preview requests are coalesced - only the newest survives,
+// because the user is dragging a slider - while saves are a queue and are never
+// dropped.
+class Compressor {
+public:
+    struct Impl;              // the worker needs it; not part of the interface
+    ~Compressor();
+    void start(HWND notify);
+    void stop();
+    void request(CompressJob job);
+    void save(CompressJob job);
+    bool pop(CompressResult& out);
+    bool busy() const;
+    void cancelBatch();
+
+private:
+    Impl* p_ = nullptr;
+};
 
 // ---------------------------------------------------------------- loader
 class Loader {
@@ -412,5 +484,6 @@ enum {
     CMD_PLAYPAUSE, CMD_MUTE, CMD_SEEK_BACK, CMD_SEEK_FWD, CMD_SPEED, CMD_STOP,
     CMD_AUTOSIZE, CMD_MORE, CMD_SETTINGS, CMD_NEWWINDOW, CMD_ASSOC_APPLY,
     CMD_ASSOC_CLEAR, CMD_ASSOC_WINDOWS, CMD_ASSOC_POPULAR, CMD_PIN,
-    CMD_ESCAPE, CMD_PRINT, CMD_HELP, CMD_ROTATE_SAVE
+    CMD_ESCAPE, CMD_PRINT, CMD_HELP, CMD_ROTATE_SAVE,
+    CMD_COMPRESS, CMD_COMP_SAVE, CMD_COMP_SAVEAS, CMD_COMP_BATCH, CMD_COMP_CANCEL
 };

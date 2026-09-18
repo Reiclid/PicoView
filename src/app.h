@@ -43,6 +43,7 @@ struct Rects {
     D2D1_RECT_F filmstrip{};
     D2D1_RECT_F commandBar{};
     D2D1_RECT_F info{};
+    D2D1_RECT_F comp{};           // compressor panel, slides in from the right
     D2D1_RECT_F gridHeader{};
     D2D1_RECT_F grid{};
 };
@@ -170,6 +171,30 @@ struct App {
     D2D1_RECT_F moreMenuAnchor{};
     D2D1_RECT_F moreMenuBounds{};
     float  menuScroll = 0, menuScrollMax = 0;
+    // ---- compressor / converter
+    Compressor   comp;
+    bool         compOpen = false;
+    int          compFormat = 0;
+    CompressMode compMode = CompressMode::Quality;
+    float        compQuality = 0.82f;
+    float        compScale = 1.f;
+    float        compPercent = 0.5f;      // Percent mode: share of the original
+    double       compTargetMB = 1.0;      // TargetBytes mode
+    bool         compDownscale = true;
+    uint64_t     compSeq = 0;
+    bool         compDirty = true;        // settings moved, a new preview is due
+    double       compDueAt = 0;           // debounce: the slider is still moving
+    bool         compPending = false;
+    bool         compHasResult = false;
+    CompressResult compRes;
+    ComPtr<ID2D1Bitmap1> compBmp;         // the preview, decoded back from bytes
+    bool         compCompare = false;     // holding the button to see the original
+    int          compBatchDone = 0, compBatchTotal = 0;
+    wstring      compStatus;
+    wstring      compOutDir;
+    float        compScroll = 0, compScrollMax = 0;
+    float        compAnim = 0.f;          // 0 closed, 1 fully slid in
+
     wstring mediaPropsPath;
     std::vector<std::pair<wstring, wstring>> mediaProps;
     bool   needRelayout = true;
@@ -216,6 +241,12 @@ struct App {
     void autoSizeWindow();             // AutoSize == 2: window follows the picture
     void rememberView();               // stash the current zoom/orientation
     void takePendingView();            // apply a stashed one after the fit
+    void openCompressor(bool on);
+    void compressRequest(bool now = false);
+    CompressJob compressJob(const wstring& path, const wstring& outPath) const;
+    wstring compressOutPath(const wstring& src, const wstring& dir) const;
+    void compressSave(bool askWhere);
+    void compressBatch();
     void openVideo(const wstring& path);
     void videoSeekBy(double delta);
     void videoSeekTo(double seconds);

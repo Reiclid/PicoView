@@ -432,6 +432,14 @@ void App::goTo(int newIndex, bool resetView) {
     index = newIndex;
     moreMenuOpen = false;
     loader.bumpGeneration();
+    // With the compressor open the canvas is a preview of this file; a different
+    // file needs its own, and the old numbers must not linger.
+    if (compOpen) {
+        compHasResult = false;
+        compBmp.Reset();
+        compCompare = false;
+        compBatchTotal = compBatchDone = 0;
+    }
     if (resetView) { rot = 0; flipH = flipV = false;
                      fitMode = (cfg.autoSize == 0) ? Fit::Actual : Fit::Window; }
 
@@ -441,6 +449,12 @@ void App::goTo(int newIndex, bool resetView) {
     if (cfg.rememberZoom) {
         auto vs = viewStates.find(p);
         if (vs != viewStates.end()) { pendingView = vs->second; hasPendingView = true; }
+    }
+
+    if (compOpen) {
+        // Videos are not ours to compress; anything else gets a fresh preview.
+        if (isVideoPath(p)) openCompressor(false);
+        else                compressRequest(true);
     }
 
     if (isVideoPath(p)) {
@@ -715,6 +729,216 @@ void App::openFolderDialog() {
         openPath(p);
         CoTaskMemFree(p);
     }
+}
+
+// ------------------------------------------------------------- compressor
+void App::openCompressor(bool on) {
+    if (on) {
+        auto pic = current();
+        if (videoMode || currentPath().empty() || !pic || pic->failed) {
+            showToast(T(L"Стиснути можна лише зображення"));
+            return;
+        }
+        if (encodeFormats().empty()) {
+            showToast(T(L"Немає доступних кодувальників"), 2.5);
+            return;
+        }
+        comp.start(hwnd);
+        // Start from the format the file already is, so "just recompress this"
+        // is the default and converting is a deliberate choice.
+        int f = encodeFormatFor(extOf(currentPath()));
+        compFormat = clampi(f >= 0 ? f : 0, 0, (int)encodeFormats().size() - 1);
+        compHasResult = false;
+        compBmp.Reset();
+        compStatus.clear();
+        compBatchDone = compBatchTotal = 0;
+        compOpen = true;
+        compScroll = 0;
+        cfg.infoPanel = false;          // both cannot own the right edge
+        needRelayout = true;
+        settingsOpen = false;
+        moreMenuOpen = false;
+        showHelp = false;
+        compressRequest(true);
+    } else {
+        compOpen = false;
+        comp.cancelBatch();
+        compBmp.Reset();
+        compHasResult = false;
+    }
+    invalidate();
+}
+
+CompressJob App::compressJob(const wstring& path, const wstring& outPath) const {
+    CompressJob j;
+    j.path = path;
+    j.outPath = outPath;
+    j.format = compFormat;
+    j.mode = compMode;
+    j.quality = compQuality;
+    j.scale = compScale;
+    j.allowDownscale = compDownscale;
+    if (compMode == CompressMode::Percent)          j.target = compPercent;
+    else if (compMode == CompressMode::TargetBytes) j.target = compTargetMB * 1024.0 * 1024.0;
+    j.previewMax = outPath.empty() ? 2600 : 0;   // the canvas shows it full size
+    return j;
+}
+
+void App::compressRequest(bool now) {
+    if (!compOpen) return;
+    compDirty = true;
+    compDueAt = nowSec() + (now ? 0.0 : 0.25);   // let a dragged slider settle
+    requestAnim();
+    invalidate();
+}
+
+// "photo (1.1 MB).jpg" next to the original, never overwriting anything.
+wstring App::compressOutPath(const wstring& src, const wstring& dir) const {
+    const auto& fs = encodeFormats();
+    wstring ext = fs.empty() ? L".jpg" : fs[clampi(compFormat, 0, (int)fs.size() - 1)].ext;
+    wstring folder = dir.empty() ? dirOf(src) : dir;
+    wstring stem = stemOf(src);
+    for (int n = 0; n < 1000; ++n) {
+        wstring name = stem + T(L" (стиснуто)");
+        if (n > 0) name += L" " + std::to_wstring(n);
+        wstring p = joinPath(folder, name + ext);
+        if (!fileExists(p)) return p;
+    }
+    return joinPath(folder, stem + ext);
+}
+
+void App::compressSave(bool askWhere) {
+    wstring src = currentPath();
+    if (src.empty()) return;
+    const auto& fs = encodeFormats();
+    if (fs.empty()) return;
+    const EncFormat& f = fs[clampi(compFormat, 0, (int)fs.size() - 1)];
+
+    wstring out = compressOutPath(src, L"");
+    if (askWhere) {
+        wchar_t buf[MAX_PATH * 2] = {};
+        wstring name = fileNameOf(out);
+        wcsncpy(buf, name.c_str(), MAX_PATH * 2 - 1);
+        wstring filter = f.name + L" (*" + f.ext + L")|*" + f.ext + L"|";
+        for (auto& c : filter) if (c == L'|') c = L'\0';
+        filter += L'\0';
+        wstring dir = dirOf(out);
+
+        OPENFILENAMEW ofn{};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = hwnd;
+        ofn.lpstrFilter = filter.c_str();
+        ofn.lpstrFile = buf;
+        ofn.nMaxFile = MAX_PATH * 2;
+        ofn.lpstrDefExt = f.ext.c_str() + 1;
+        ofn.lpstrInitialDir = dir.c_str();
+        ofn.Flags = OFN_OVERWRITEPROMPT | OFN_EXPLORER | OFN_NOCHANGEDIR;
+        if (!GetSaveFileNameW(&ofn)) return;
+        out = buf;
+    }
+
+    compBatchTotal = 1;
+    compBatchDone = 0;
+    compStatus = T(L"Збереження…");
+    comp.save(compressJob(src, out));
+    requestAnim();
+    invalidate();
+}
+
+void App::compressBatch() {
+    if (folder.count() == 0) return;
+
+    ComPtr<IFileOpenDialog> dlg;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg)))) return;
+    DWORD opts = 0;
+    dlg->GetOptions(&opts);
+    dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+    if (FAILED(dlg->Show(hwnd))) return;
+    ComPtr<IShellItem> item;
+    if (FAILED(dlg->GetResult(&item))) return;
+    PWSTR raw = nullptr;
+    if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &raw)) || !raw) return;
+    compOutDir = raw;
+    CoTaskMemFree(raw);
+
+    // Videos are not ours to compress, and neither is anything the decoder
+    // cannot open in the first place.
+    std::vector<wstring> list;
+    for (size_t i = 0; i < folder.count(); ++i) {
+        wstring p = joinPath(folder.dir(), folder.at((int)i).name);
+        if (!isVideoPath(p) && decodeIsSupported(extOf(p))) list.push_back(p);
+    }
+    if (list.empty()) { showToast(T(L"У папці немає зображень")); return; }
+
+    compBatchTotal = (int)list.size();
+    compBatchDone = 0;
+    compStatus = T(L"Обробка папки…");
+    for (size_t i = 0; i < list.size(); ++i) {
+        CompressJob j = compressJob(list[i], compressOutPath(list[i], compOutDir));
+        j.batchIndex = (int)i + 1;
+        j.batchTotal = (int)list.size();
+        comp.save(std::move(j));
+    }
+    requestAnim();
+    invalidate();
+}
+
+// Drain whatever the worker finished.
+static void pumpCompressor(App& a) {
+    CompressResult r;
+    bool changed = false;
+    while (a.comp.pop(r)) {
+        changed = true;
+        if (r.outPath.empty()) {
+            // A preview.
+            a.compPending = false;
+            pgLog("compress preview: %.0f ms  %llu -> %llu bytes  q=%.2f scale=%.2f",
+                  r.ms, (unsigned long long)r.srcBytes, (unsigned long long)r.outBytes,
+                  r.usedQuality, r.usedScale);
+            if (r.ok) {
+                a.compRes = r;
+                a.compHasResult = true;
+                a.compBmp = r.preview.valid() ? a.gfx.upload(r.preview) : nullptr;
+                a.compStatus.clear();
+            } else {
+                a.compStatus = r.error;
+            }
+        } else {
+            if (r.batchTotal > 0) {
+                a.compBatchDone++;
+                if (a.compBatchDone >= a.compBatchTotal) {
+                    a.compStatus.clear();
+                    a.showToast(T(L"Збережено файлів: ") + std::to_wstring(a.compBatchDone), 2.4);
+                } else {
+                    a.compStatus = T(L"Обробка папки…") + (L"  " + std::to_wstring(a.compBatchDone) +
+                                   L"/" + std::to_wstring(a.compBatchTotal));
+                }
+            } else {
+                a.compBatchDone++;
+                a.compStatus.clear();
+                a.showToast(r.saved ? (T(L"Збережено: ") + fileNameOf(r.outPath))
+                                    : (r.error.empty() ? T(L"Не вдалося зберегти") : r.error), 2.6);
+            }
+        }
+    }
+    if (changed) a.invalidate();
+}
+
+// Fire the debounced preview once the sliders have stopped moving.
+static void tickCompressor(App& a) {
+    if (!a.compOpen) return;
+    if (a.compPending) { a.requestAnim(); return; }
+    if (!a.compDirty) return;
+    if (nowSec() < a.compDueAt) { a.requestAnim(); return; }
+    wstring p = a.currentPath();
+    if (p.empty()) { a.compDirty = false; return; }
+    a.compDirty = false;
+    a.compPending = true;
+    a.compSeq++;
+    CompressJob j = a.compressJob(p, L"");
+    j.id = a.compSeq;
+    a.comp.request(std::move(j));
+    a.requestAnim();
 }
 
 void App::revealInExplorer() {
@@ -1064,9 +1288,16 @@ void uiOnCommand(App& a, int cmd) {
             }
             break;
 
+        case CMD_COMPRESS:     a.openCompressor(!a.compOpen); break;
+        case CMD_COMP_SAVE:    a.compressSave(false); break;
+        case CMD_COMP_SAVEAS:  a.compressSave(true); break;
+        case CMD_COMP_BATCH:   a.compressBatch(); break;
+        case CMD_COMP_CANCEL:  a.comp.cancelBatch(); a.compStatus.clear(); a.invalidate(); break;
+
         case CMD_HELP: a.showHelp = !a.showHelp; a.invalidate(); break;
         case CMD_ESCAPE:
-            if (a.settingsOpen) a.settingsOpen = false;
+            if (a.compOpen) a.openCompressor(false);
+            else if (a.settingsOpen) a.settingsOpen = false;
             else if (a.moreMenuOpen || a.sortMenuOpen) { a.moreMenuOpen = a.sortMenuOpen = false; }
             else if (a.showHelp) a.showHelp = false;
             else if (a.fullscreen) a.setFullscreen(false);
@@ -1168,6 +1399,18 @@ static void stepAnimations(App& a, double dt) {
 
     if (a.fadeIn < 1.f) { a.fadeIn = clampf(a.fadeIn + (float)dt * 5.0f, 0.f, 1.f); a.requestAnim(); }
 
+    // The compressor panel slides in from the edge and takes width away from the
+    // canvas as it goes, so the layout has to be redone while it moves.
+    float compWant = a.compOpen ? 1.f : 0.f;
+    if (fabsf(a.compAnim - compWant) > 0.002f) {
+        a.compAnim += (compWant - a.compAnim) * (float)(1.0 - pow(4e-9, clampf((float)dt, 0.f, 0.1f)));
+        a.needRelayout = true;
+        a.requestAnim();
+    } else if (a.compAnim != compWant) {
+        a.compAnim = compWant;
+        a.needRelayout = true;
+    }
+
     // Playback needs a steady stream of repaints to pull frames.
     if (a.videoMode && a.video.playing()) a.requestAnim();
 
@@ -1213,6 +1456,7 @@ static void render(App& a) {
     }
 
     a.animating = false;
+    tickCompressor(a);
     stepAnimations(a, dt);
     a.clampPan();
 
@@ -1249,6 +1493,7 @@ static void onKey(App& a, WPARAM key) {
             case 'O': uiOnCommand(a, CMD_OPEN); return;
             case 'D': uiOnCommand(a, CMD_OPEN_FOLDER); return;
             case 'N': uiOnCommand(a, CMD_NEWWINDOW); return;
+            case 'E': uiOnCommand(a, CMD_COMPRESS); return;
             case VK_OEM_COMMA: uiOnCommand(a, CMD_SETTINGS); return;
             case VK_OEM_PLUS: case VK_ADD: uiOnCommand(a, CMD_ZOOM_IN); return;
             case VK_OEM_MINUS: case VK_SUBTRACT: uiOnCommand(a, CMD_ZOOM_OUT); return;
@@ -1323,6 +1568,11 @@ static void onWheel(App& a, int delta, POINT ptClient) {
     bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     a.lastMouseMove = nowSec();
 
+    if (a.compOpen) {
+        a.compScroll = clampf(a.compScroll - delta * a.gfx.s(0.9f), 0.f, a.compScrollMax);
+        a.invalidate();
+        return;
+    }
     if (a.settingsOpen) {
         a.settingsScroll = clampf(a.settingsScroll - delta * a.gfx.s(0.9f), 0.f, a.settingsScrollMax);
         a.invalidate();
@@ -1495,6 +1745,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             onWheel(a, GET_WHEEL_DELTA_WPARAM(wp), pt);
             return 0;
         }
+
+        case WM_PG_COMPRESS: pumpCompressor(a); return 0;
 
         case WM_KEYDOWN: onKey(a, wp); return 0;
         case WM_SYSKEYDOWN:
@@ -1879,6 +2131,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         DispatchMessageW(&msg);
     }
 
+    app.comp.stop();
     app.loader.stop();
     app.preview.close();
     app.video.shutdown();

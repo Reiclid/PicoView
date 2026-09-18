@@ -58,6 +58,7 @@ namespace ico {
     static const wchar_t* Check = L"";
     static const wchar_t* Pin = L"";
     static const wchar_t* Unpin = L"";
+    static const wchar_t* Compress = L"";
 }
 
 // --------------------------------------------------------------- frame-local
@@ -158,7 +159,8 @@ enum UiId {
     UI_V_MORE, UI_BAR_MORE,
     UI_MENU_BASE = 1800,
     UI_SET_BASE = 2000,
-    UI_ASSOC_BASE = 2400
+    UI_ASSOC_BASE = 2400,
+    UI_COMP_BASE = 2600
 };
 
 // --------------------------------------------------------------- widgets
@@ -498,6 +500,7 @@ static std::vector<MenuEntry> buildActionMenu(App& a, bool forVideo) {
     add(CMD_FILMSTRIP, ico::Film, T(L"Стрічка кадрів"), L"T", a.cfg.filmstrip, a.folder.count() > 1);
     add(CMD_INFO, ico::Info, T(L"Відомості"), L"I", a.cfg.infoPanel);
     sep();
+    if (!forVideo) add(CMD_COMPRESS, ico::Compress, T(L"Стиснути та конвертувати"), L"Ctrl+E", false, has);
     if (!forVideo) add(CMD_COPY, ico::Copy, T(L"Копіювати"), L"Ctrl+C", false, has);
     add(CMD_REVEAL, ico::Reveal, T(L"Показати в провіднику"), nullptr);
     add(CMD_NEWWINDOW, ico::NewWindow, T(L"Відкрити нове вікно"), L"Ctrl+N");
@@ -525,9 +528,18 @@ void uiLayout(App& a) {
     a.R.btnMin = rectOf(g.width - btnW * 3, 0, btnW, tb);
     a.R.caption = rectOf(0, 0, g.width - btnW * 3 - g.s(96.f), tb);
 
-    float infoW = (a.cfg.infoPanel && !a.fullscreen && g.width > g.s(760.f)) ? g.s(320.f) : 0.f;
+    float compW = 0.f;
+    if (a.compAnim > 0.002f)
+        compW = std::min(g.s(340.f), (float)g.width * 0.6f) * a.compAnim;
+    float infoW = (a.cfg.infoPanel && !a.fullscreen && compW <= 0.f && g.width > g.s(760.f))
+                      ? g.s(320.f) : 0.f;
+    // The panel is a solid surface with its own header, so it always starts
+    // below the title bar - even where the title bar floats over the picture,
+    // or its heading would collide with the window buttons.
+    float compTop = a.fullscreen ? 0.f : tb;
+    a.R.comp = rectOf(g.width - compW, compTop, compW, g.height - compTop);
     a.R.info = rectOf(g.width - infoW, contentTop, infoW, g.height - contentTop);
-    a.R.content = rectOf(0, contentTop, g.width - infoW, g.height - contentTop);
+    a.R.content = rectOf(0, contentTop, g.width - infoW - compW, g.height - contentTop);
 
     if (a.view == View::Grid) {
         float hh = g.s(56.f);
@@ -879,7 +891,14 @@ static void drawImage(App& a) {
         if (clip.right > clip.left && clip.bottom > clip.top) drawCheckerboard(g, clip, a.th);
     }
 
-    float effective = a.zoom * (pic->w / srcW);      // bitmap texel -> screen pixel
+    // With the compressor open the canvas *is* the preview: the result is drawn
+    // over exactly the area the original would cover, so the comparison is like
+    // for like even when the output has fewer pixels.
+    ID2D1Bitmap1* shown = pic->bmp.Get();
+    if (a.compOpen && a.compBmp && !a.compCompare) shown = a.compBmp.Get();
+    float shownW = shown->GetSize().width;
+
+    float effective = a.zoom * (shownW / srcW);      // bitmap texel -> screen pixel
     D2D1_INTERPOLATION_MODE mode;
     if (!a.cfg.smoothing && effective >= 1.f)      mode = D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR;
     else if (effective >= 4.f)                     mode = D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR;
@@ -888,7 +907,7 @@ static void drawImage(App& a) {
 
     g.dc->SetTransform(m);
     float op = clampf(a.fadeIn, 0.f, 1.f);
-    g.dc->DrawBitmap(pic->bmp.Get(), rectOf(0, 0, srcW, srcH), op, mode, nullptr, nullptr);
+    g.dc->DrawBitmap(shown, rectOf(0, 0, srcW, srcH), op, mode, nullptr, nullptr);
     g.dc->SetTransform(D2D1::Matrix3x2F::Identity());
     g.dc->PopAxisAlignedClip();
 
@@ -1832,6 +1851,276 @@ static float assocGrid(App& a, D2D1_RECT_F area, float& y, const std::vector<siz
     return h;
 }
 
+// --------------------------------------------------------------- compressor
+static wstring compSizeText(double bytes) {
+    wchar_t b[32];
+    if (bytes >= 1024.0 * 1024.0)      swprintf(b, 32, L"%.2f MB", bytes / (1024.0 * 1024.0));
+    else if (bytes >= 1024.0)          swprintf(b, 32, L"%.0f KB", bytes / 1024.0);
+    else                               swprintf(b, 32, L"%.0f B", bytes);
+    return b;
+}
+
+// A panel docked to the right edge rather than a sheet over the picture: the
+// canvas keeps showing the photo, and what it shows is the compressed result.
+static void drawCompressor(App& a) {
+    Gfx& g = a.gfx;
+    D2D1_RECT_F panel = a.R.comp;
+    if (rw(panel) < g.s(8.f)) return;
+
+    const auto& formats = encodeFormats();
+    if (formats.empty()) { a.compOpen = false; return; }
+    const EncFormat& fmt = formats[clampi(a.compFormat, 0, (int)formats.size() - 1)];
+
+    g.dc->FillRectangle(panel, g.solid(a.th.chrome));
+    g.dc->FillRectangle(rectOf(panel.left, panel.top, g.s(1.f), rh(panel)), g.solid(a.th.stroke));
+    if (inRect(panel, a.in.mouse) && a.in.hasMouse) g_overUi = true;
+
+    float pad = g.s(16.f);
+    D2D1_RECT_F inner = rectOf(panel.left + pad, panel.top, rw(panel) - pad * 2 - g.s(6.f), rh(panel));
+    if (rw(inner) < g.s(80.f)) return;          // still sliding in
+
+    // ---------------- header
+    float hdr = g.s(48.f);
+    g.text(T(L"Стиснути та конвертувати"), g.fBodyStrong.Get(),
+           rectOf(inner.left, panel.top, rw(inner) - g.s(34.f), hdr), a.th.text);
+    if (button(a, UI_COMP_BASE, CMD_NONE,
+               rectOf(inner.right - g.s(30.f), panel.top + g.s(9.f), g.s(30.f), g.s(30.f)),
+               ico::Close, T(L"Закрити  (Esc)"))) {
+        a.openCompressor(false);
+        return;
+    }
+    g.dc->FillRectangle(rectOf(panel.left + g.s(1.f), panel.top + hdr, rw(panel), g.s(1.f)),
+                        g.solid(a.th.stroke));
+
+    D2D1_RECT_F col = rectOf(inner.left, panel.top + hdr + g.s(10.f), rw(inner),
+                             rh(panel) - hdr - g.s(10.f));
+    if (rh(col) < g.s(40.f)) return;
+
+    g.dc->PushAxisAlignedClip(rectOf(panel.left, col.top, rw(panel), rh(col)),
+                              D2D1_ANTIALIAS_MODE_ALIASED);
+    float y = col.top - a.compScroll;
+    float rowH = g.s(22.f);
+    auto label = [&](const wchar_t* t) {
+        g.text(t, g.fCaption.Get(), rectOf(col.left, y, rw(col), rowH), a.th.textDim);
+        y += rowH;
+    };
+
+    // ---------------- format
+    label(T(L"Формат"));
+    {
+        float gap = g.s(6.f);
+        int perRow = clampi((int)((rw(col) + gap) / (g.s(72.f) + gap)), 1, 4);
+        float cw = (rw(col) - gap * (perRow - 1)) / perRow, ch = g.s(30.f);
+        for (size_t i = 0; i < formats.size(); ++i) {
+            int cx = (int)i % perRow, cy = (int)i / perRow;
+            D2D1_RECT_F r = rectOf(col.left + cx * (cw + gap), y + cy * (ch + gap), cw, ch);
+            bool sel = (int)i == a.compFormat;
+            if (textButton(a, UI_COMP_BASE + 10 + (int)i, CMD_NONE, r, formats[i].name, nullptr,
+                           { sel, true, false, false, 5.f }) && !sel) {
+                a.compFormat = (int)i;
+                a.compressRequest(true);
+            }
+        }
+        y += ((formats.size() + perRow - 1) / perRow) * (ch + gap) + g.s(8.f);
+    }
+
+    // ---------------- mode
+    label(T(L"Режим"));
+    {
+        const wchar_t* modes[] = { T(L"Якість"), T(L"Відсоток"), T(L"Розмір файлу") };
+        int cur = (int)a.compMode;
+        float gap = g.s(6.f);
+        float cw = (rw(col) - gap * 2) / 3.f, ch = g.s(30.f);
+        for (int i = 0; i < 3; ++i) {
+            D2D1_RECT_F r = rectOf(col.left + i * (cw + gap), y, cw, ch);
+            if (textButton(a, UI_COMP_BASE + 30 + i, CMD_NONE, r, modes[i], nullptr,
+                           { i == cur, true, false, false, 5.f }) && i != cur) {
+                a.compMode = (CompressMode)i;
+                a.compressRequest(true);
+            }
+        }
+        y += ch + g.s(12.f);
+    }
+
+    auto sliderRow = [&](int uid, const wchar_t* name, const wstring& value, float v, float& out) {
+        g.text(name, g.fCaption.Get(), rectOf(col.left, y, rw(col) - g.s(80.f), rowH), a.th.textDim);
+        g.text(value, g.fCaption.Get(), rectOf(col.right - g.s(80.f), y, g.s(80.f), rowH),
+               a.th.text, DWRITE_TEXT_ALIGNMENT_TRAILING);
+        y += rowH;
+        bool dragging = slider(a, uid, rectOf(col.left, y + g.s(2.f), rw(col), g.s(14.f)), v, out, 1.f, 4.f);
+        y += g.s(26.f);
+        return dragging;
+    };
+
+    if (a.compMode == CompressMode::Quality) {
+        if (!fmt.quality) {
+            g.text(T(L"Формат без втрат — якість не регулюється"), g.fSmall.Get(),
+                   rectOf(col.left, y, rw(col), rowH * 2), a.th.textMute);
+            y += rowH + g.s(8.f);
+        } else {
+            float v = a.compQuality, out = v;
+            wchar_t b[16]; swprintf(b, 16, L"%d", (int)lround(a.compQuality * 100.f));
+            if (sliderRow(UI_COMP_BASE + 40, T(L"Якість"), b, v, out)) {
+                a.compQuality = clampf(out, 0.05f, 1.f);
+                a.compressRequest();
+            }
+        }
+    } else if (a.compMode == CompressMode::Percent) {
+        float v = a.compPercent, out = v;
+        wchar_t b[16]; swprintf(b, 16, L"%d%%", (int)lround(a.compPercent * 100.f));
+        if (sliderRow(UI_COMP_BASE + 41, T(L"Частка від оригіналу"), b, v, out)) {
+            a.compPercent = clampf(out, 0.02f, 1.f);
+            a.compressRequest();
+        }
+    } else {
+        // 0.02 .. 25 MB on a curve, so the small end where it matters is usable.
+        const double maxMB = 25.0;
+        float v = (float)pow(clampf((float)(a.compTargetMB / maxMB), 0.f, 1.f), 1.0 / 2.2), out = v;
+        wchar_t b[24]; swprintf(b, 24, L"%.2f MB", a.compTargetMB);
+        if (sliderRow(UI_COMP_BASE + 42, T(L"Цільовий розмір"), b, v, out)) {
+            a.compTargetMB = std::max(0.02, pow((double)out, 2.2) * maxMB);
+            a.compressRequest();
+        }
+    }
+
+    {
+        float v = a.compScale, out = v;
+        wchar_t b[24];
+        if (a.compHasResult) swprintf(b, 24, L"%d×%d", a.compRes.outW, a.compRes.outH);
+        else                 swprintf(b, 24, L"%d%%", (int)lround(a.compScale * 100.f));
+        if (sliderRow(UI_COMP_BASE + 43, T(L"Роздільність"), b, v, out)) {
+            a.compScale = clampf(out, 0.05f, 1.f);
+            a.compressRequest();
+        }
+    }
+
+    if (a.compMode != CompressMode::Quality) {
+        D2D1_RECT_F tr = rectOf(col.left, y, rw(col), g.s(30.f));
+        g.text(T(L"Зменшувати за потреби"), g.fCaption.Get(),
+               rectOf(tr.left, tr.top, rw(tr) - g.s(52.f), rh(tr)), a.th.textDim);
+        if (toggleSwitch(a, UI_COMP_BASE + 50, tr, a.compDownscale)) {
+            a.compDownscale = !a.compDownscale;
+            a.compressRequest(true);
+        }
+        y += g.s(36.f);
+    }
+
+    // ---------------- numbers
+    y += g.s(2.f);
+    g.dc->FillRectangle(rectOf(col.left, y, rw(col), g.s(1.f)), g.solid(a.th.stroke));
+    y += g.s(10.f);
+
+    float statOp = a.compPending ? 0.45f : 1.f;
+    auto statRow = [&](const wchar_t* k, const wstring& v, const D2D1_COLOR_F& c) {
+        g.text(k, g.fCaption.Get(), rectOf(col.left, y, rw(col) * .45f, rowH),
+               alpha(a.th.textMute, statOp));
+        g.text(v, g.fBodyStrong.Get(), rectOf(col.left + rw(col) * .3f, y, rw(col) * .7f, rowH),
+               alpha(c, statOp), DWRITE_TEXT_ALIGNMENT_TRAILING);
+        y += rowH + g.s(2.f);
+    };
+
+    if (a.compHasResult) {
+        const CompressResult& r = a.compRes;
+        wchar_t buf[64];
+        swprintf(buf, 64, L"%s · %d×%d", compSizeText((double)r.srcBytes).c_str(), r.srcW, r.srcH);
+        statRow(T(L"Було"), buf, a.th.textDim);
+        swprintf(buf, 64, L"%s · %d×%d", compSizeText((double)r.outBytes).c_str(), r.outW, r.outH);
+        statRow(T(L"Стане"), buf, a.th.text);
+
+        if (r.srcBytes > 0) {
+            double d = 100.0 * (1.0 - (double)r.outBytes / (double)r.srcBytes);
+            swprintf(buf, 64, d >= 0 ? L"−%.0f%%" : L"+%.0f%%", fabs(d));
+            statRow(T(L"Різниця"), buf, d >= 0 ? a.th.accent : a.th.danger);
+        }
+        if (fmt.quality && a.compMode != CompressMode::Quality) {
+            swprintf(buf, 64, L"%d", (int)lround(r.usedQuality * 100.f));
+            statRow(T(L"Підібрана якість"), buf, a.th.textDim);
+        }
+        if (r.missedTarget) {
+            g.text(T(L"Менше зробити не вдалося"), g.fSmall.Get(),
+                   rectOf(col.left, y, rw(col), rowH * 2), a.th.danger);
+            y += rowH + g.s(4.f);
+        }
+    } else if (!a.compStatus.empty()) {
+        g.text(a.compStatus, g.fSmall.Get(), rectOf(col.left, y, rw(col), rowH * 2), a.th.danger);
+        y += rowH;
+    }
+
+    // Hold this to put the untouched picture back on the canvas for a moment.
+    {
+        float bh2 = g.s(30.f);
+        D2D1_RECT_F cmp = rectOf(col.left, y, rw(col), bh2);
+        auto pic = a.current();
+        bool can = pic && pic->bmp && a.compBmp;
+        bool over = can && inRect(cmp, a.in.mouse) && a.in.hasMouse;
+        if (over) { g_overUi = true; useCursor(a, IDC_HAND); a.hot = UI_COMP_BASE + 2; }
+        bool holding = over && a.in.down;
+        if (holding != a.compCompare) { a.compCompare = holding; a.invalidate(); }
+        g.roundRect(cmp, g.s(5.f), holding ? alpha(a.th.accent, 0.25f)
+                                           : (over ? a.th.cardHover : a.th.card));
+        g.text(holding ? T(L"Оригінал") : T(L"Затисніть для оригіналу"), g.fCaption.Get(),
+               cmp, holding ? a.th.accent : a.th.textDim, DWRITE_TEXT_ALIGNMENT_CENTER);
+        y += bh2 + g.s(10.f);
+    }
+
+    // ---------------- actions
+    {
+        float bh2 = g.s(34.f);
+        bool ready = a.compHasResult && !a.compPending;
+        float half = (rw(col) - g.s(8.f)) * .5f;
+        textButton(a, UI_COMP_BASE + 60, CMD_COMP_SAVE, rectOf(col.left, y, half, bh2),
+                   T(L"Зберегти"), nullptr, { false, ready, false, true, 5.f });
+        textButton(a, UI_COMP_BASE + 61, CMD_COMP_SAVEAS, rectOf(col.left + half + g.s(8.f), y, half, bh2),
+                   T(L"Зберегти як…"), nullptr, { false, ready, false, false, 5.f });
+        y += bh2 + g.s(8.f);
+
+        bool batching = a.compBatchTotal > 1 && a.compBatchDone < a.compBatchTotal;
+        if (batching) {
+            D2D1_RECT_F pr2 = rectOf(col.left, y + g.s(14.f), rw(col) - g.s(92.f), g.s(6.f));
+            g.roundRect(pr2, g.s(3.f), alpha(a.th.text, 0.2f));
+            float frac = a.compBatchTotal ? (float)a.compBatchDone / a.compBatchTotal : 0.f;
+            g.roundRect(rectOf(pr2.left, pr2.top, rw(pr2) * frac, rh(pr2)), g.s(3.f), a.th.accent);
+            g.text(std::to_wstring(a.compBatchDone) + L" / " + std::to_wstring(a.compBatchTotal),
+                   g.fCaption.Get(), rectOf(col.left, y, rw(col) - g.s(92.f), bh2),
+                   a.th.textDim, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            textButton(a, UI_COMP_BASE + 63, CMD_COMP_CANCEL,
+                       rectOf(col.right - g.s(86.f), y, g.s(86.f), bh2),
+                       T(L"Скасувати"), nullptr, { false, true, true, false, 5.f });
+            a.requestAnim();
+        } else {
+            size_t n = 0;
+            for (size_t i = 0; i < a.folder.count(); ++i)
+                if (!isVideoPath(a.folder.at((int)i).name)) ++n;
+            textButton(a, UI_COMP_BASE + 62, CMD_COMP_BATCH, rectOf(col.left, y, rw(col), bh2),
+                       T(L"Уся папка…") + (n ? (L"  (" + std::to_wstring(n) + L")") : L""),
+                       T(L"Обробити всі зображення папки в іншу теку"),
+                       { false, n > 0 && ready, false, false, 5.f });
+        }
+        y += bh2 + g.s(12.f);
+    }
+
+    g.dc->PopAxisAlignedClip();
+
+    float contentH = (y + a.compScroll) - col.top;
+    a.compScrollMax = std::max(0.f, contentH - rh(col));
+    a.compScroll = clampf(a.compScroll, 0.f, a.compScrollMax);
+    if (a.compScrollMax > 1.f) {
+        float trackH = rh(col) - g.s(8.f);
+        float thumbH = std::max(g.s(28.f), trackH * (rh(col) / std::max(1.f, contentH)));
+        float t = a.compScroll / a.compScrollMax;
+        g.roundRect(rectOf(panel.right - g.s(6.f), col.top + g.s(4.f) + t * (trackH - thumbH),
+                           g.s(3.f), thumbH), g.s(1.5f), alpha(a.th.text, 0.30f));
+    }
+
+    // The canvas is the preview, so the wait belongs on the canvas.
+    if (a.compPending) {
+        drawSpinner(g, D2D1::Point2F((a.R.canvas.left + a.R.canvas.right) * .5f,
+                                     a.R.canvas.top + g.s(44.f)),
+                    g.s(13.f), a.th.textDim, nowSec());
+        a.requestAnim();
+    }
+}
+
 static void drawSettings(App& a) {
     if (!a.settingsOpen) return;
     Gfx& g = a.gfx;
@@ -2330,6 +2619,7 @@ void uiFrame(App& a) {
     if (rh(a.R.filmstrip) > 1 && a.barAlpha > 0.25f &&
         inRect(a.R.filmstrip, a.in.mouse) && a.in.hasMouse) g_overUi = true;
     if (rw(a.R.info) > 1 && inRect(a.R.info, a.in.mouse) && a.in.hasMouse) g_overUi = true;
+    if (rw(a.R.comp) > 1 && inRect(a.R.comp, a.in.mouse) && a.in.hasMouse) g_overUi = true;
     if (a.view == View::Viewer && a.barAlpha > 0.05f && rw(a.R.commandBar) > 1 &&
         inRect(inflate(a.R.commandBar, g.s(10.f)), a.in.mouse) && a.in.hasMouse) g_overUi = true;
     if (a.moreMenuOpen || a.settingsOpen) g_overUi = true;
@@ -2347,6 +2637,7 @@ void uiFrame(App& a) {
     }
 
     drawInfoPanel(a);
+    drawCompressor(a);
     drawTitlebar(a);
     if (a.moreMenuOpen && a.view == View::Viewer) {
         auto entries = buildActionMenu(a, a.videoMode);

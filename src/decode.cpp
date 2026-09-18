@@ -442,6 +442,10 @@ bool decodeIsSupported(const wstring& ext) {
 
 const std::vector<wstring>& decodeExtensions() { return g_exts; }
 
+// encode.cpp writes through the same factory: WIC is free-threaded and there is
+// no reason to create a second one.
+IWICImagingFactory2* pgWic() { return g_wic.Get(); }
+
 wstring decodeFilterString() {
     wstring all;
     for (const auto& e : g_exts) { if (!all.empty()) all += L";"; all += L"*" + e; }

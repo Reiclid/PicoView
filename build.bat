@@ -46,7 +46,8 @@ set LIBS=user32.lib gdi32.lib shell32.lib shlwapi.lib ole32.lib oleaut32.lib uui
  windowscodecs.lib dwmapi.lib mfplat.lib mfuuid.lib mfreadwrite.lib
 
 cl %CFLAGS% /Fo:build\ /Fd:build\ src\main.cpp src\ui.cpp src\gfx.cpp src\decode.cpp ^
-   src\loader.cpp src\util.cpp src\video.cpp src\lang.cpp build\app.res /Fe:PicoView.exe %LFLAGS% %LIBS% || exit /b 1
+   src\loader.cpp src\util.cpp src\video.cpp src\lang.cpp src\encode.cpp ^
+   build\app.res /Fe:PicoView.exe %LFLAGS% %LIBS% || exit /b 1
 
 echo.
 for %%F in (PicoView.exe) do echo    PicoView.exe  -  %%~zF bytes
