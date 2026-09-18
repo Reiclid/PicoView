@@ -595,12 +595,18 @@ static void drawTitlebar(App& a) {
     if (a.titleOverlay()) {
         top = a.barAlpha;
         if (top <= 0.01f) return;
-        // Square off the bottom so the strip meets the rounded window corners.
+        // Rounded at the top to meet the window corners, square at the bottom.
+        // Drawn as one shape that hangs past the strip and is clipped: filling
+        // the bottom band separately laid a second coat of a translucent colour
+        // over it, and those eight pixels came out denser than the rest.
+        //
+        // No hairline under it either: a separator earns its place between two
+        // docked surfaces, but floating over a photo it is just a light line
+        // drawn across the picture.
         D2D1_COLOR_F bg = alpha(a.th.bar, top * 0.94f);
-        g.roundRect(r, g.s(8.f), bg);
-        g.dc->FillRectangle(rectOf(r.left, r.bottom - g.s(8.f), rw(r), g.s(8.f)), g.solid(bg));
-        g.dc->FillRectangle(rectOf(r.left, r.bottom - g.s(1.f), rw(r), g.s(1.f)),
-                            g.solid(alpha(a.th.barStroke, top)));
+        g.dc->PushAxisAlignedClip(r, D2D1_ANTIALIAS_MODE_ALIASED);
+        g.roundRect(rectOf(r.left, r.top, rw(r), rh(r) + g.s(8.f)), g.s(8.f), bg);
+        g.dc->PopAxisAlignedClip();
     }
 
     float pad = g.s(10.f);
