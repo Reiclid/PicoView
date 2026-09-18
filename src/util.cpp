@@ -492,6 +492,7 @@ void Settings::load() {
     muted = iniInt(f, L"Muted", muted) != 0;
     autoPlay = iniInt(f, L"AutoPlay", autoPlay) != 0;
     autoSize = clampi(iniInt(f, L"AutoSize", autoSize), 0, 2);
+    autoSizeMax = clampi(iniInt(f, L"AutoSizeMax", autoSizeMax), 30, 100);
     lang = iniInt(f, L"Lang", -1);
     if (lang < 0 || lang > 2) {
         WORD p = PRIMARYLANGID(GetUserDefaultUILanguage());
@@ -545,6 +546,7 @@ void Settings::save() const {
     put(L"Muted", muted);
     put(L"AutoPlay", autoPlay);
     put(L"AutoSize", autoSize);
+    put(L"AutoSizeMax", autoSizeMax);
     put(L"Lang", lang);
     put(L"RememberZoom", rememberZoom);
     put(L"AlwaysOnTop", alwaysOnTop);

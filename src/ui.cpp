@@ -2578,6 +2578,22 @@ static void drawSettings(App& a) {
             touched();
         }
 
+        if (a.cfg.autoSize == 2) {
+            D2D1_RECT_F mr = setLabel(s, T(L"Найбільше вікно"),
+                                      T(L"Частка екрана, яку може зайняти вікно"), rowH2);
+            float v = (a.cfg.autoSizeMax - 30) / 70.f, outv = v;
+            if (slider(a, UI_SET_BASE + 55,
+                       rectOf(mr.left, mr.top + rowH2 * .5f - g.s(7.f), rw(mr) - g.s(58.f), g.s(14.f)),
+                       v, outv, 1.f, 4.f)) {
+                a.cfg.autoSizeMax = clampi(30 + (int)lround(outv * 70.f), 30, 100);
+                a.autoSizeWindow();
+                touched();
+            }
+            g.text(std::to_wstring(a.cfg.autoSizeMax) + L"%", g.fCaption.Get(),
+                   rectOf(mr.right - g.s(52.f), mr.top, g.s(52.f), rowH2),
+                   a.th.textDim, DWRITE_TEXT_ALIGNMENT_TRAILING);
+        }
+
         const wchar_t* wheels[] = { T(L"Масштаб"), T(L"Гортання") };
         p = segmented(a, UI_SET_BASE + 60, setLabel(s, T(L"Колесо миші"), nullptr, rowH), wheels, 2, a.cfg.wheelMode);
         if (p >= 0) { a.cfg.wheelMode = p; touched(); }

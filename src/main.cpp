@@ -300,9 +300,12 @@ void App::autoSizeWindow() {
     MONITORINFO mi{ sizeof(mi) };
     if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) return;
 
-    // Never grow past the work area; shrink the picture instead.
-    double maxCanvasW = (mi.rcWork.right - mi.rcWork.left) - fx * 2 - infoW;
-    double maxCanvasH = (mi.rcWork.bottom - mi.rcWork.top) - fy - titleH;
+    // Never grow past the work area, and by default not even that far: a 24 MP
+    // photo filling the whole screen the moment it opens is rarely what anyone
+    // wants, so the share of the screen is a setting.
+    double share = clampi(cfg.autoSizeMax, 30, 100) / 100.0;
+    double maxCanvasW = (mi.rcWork.right - mi.rcWork.left) * share - fx * 2 - infoW;
+    double maxCanvasH = (mi.rcWork.bottom - mi.rcWork.top) * share - fy - titleH;
     double k = std::min(1.0, std::min(maxCanvasW / sw, maxCanvasH / sh));
     if (!(k > 0.01)) return;
 
@@ -1124,6 +1127,60 @@ void App::setAsWallpaper() {
         showToast(T(L"Не вдалося встановити шпалери"));
 }
 
+// Apply what the viewer is showing to real pixels: the crop first, then the
+// same rotate-and-mirror order the draw transform uses.
+static void cropBuf(PixelBuf& buf, int x0, int y0, int w, int h) {
+    if (w <= 0 || h <= 0 || (x0 == 0 && y0 == 0 && w == buf.w && h == buf.h)) return;
+    x0 = clampi(x0, 0, std::max(0, buf.w - 1));
+    y0 = clampi(y0, 0, std::max(0, buf.h - 1));
+    w = clampi(w, 1, buf.w - x0);
+    h = clampi(h, 1, buf.h - y0);
+    PixelBuf out;
+    out.w = w; out.h = h;
+    out.px.resize((size_t)w * h * 4);
+    for (int y = 0; y < h; ++y)
+        memcpy(&out.px[(size_t)y * w * 4], &buf.px[((size_t)(y0 + y) * buf.w + x0) * 4], (size_t)w * 4);
+    buf = std::move(out);
+}
+
+static void orientBuf(PixelBuf& buf, int rot, bool flipH, bool flipV) {
+    rot &= 3;
+    if (rot) {
+        PixelBuf out;
+        bool swap = (rot & 1) != 0;
+        out.w = swap ? buf.h : buf.w;
+        out.h = swap ? buf.w : buf.h;
+        out.px.resize((size_t)out.w * out.h * 4);
+        const uint32_t* src = (const uint32_t*)buf.px.data();
+        uint32_t* dst = (uint32_t*)out.px.data();
+        for (int y = 0; y < buf.h; ++y) {
+            for (int x = 0; x < buf.w; ++x) {
+                int nx, ny;
+                if (rot == 1)      { nx = buf.h - 1 - y; ny = x; }
+                else if (rot == 2) { nx = buf.w - 1 - x; ny = buf.h - 1 - y; }
+                else               { nx = y;             ny = buf.w - 1 - x; }
+                dst[(size_t)ny * out.w + nx] = src[(size_t)y * buf.w + x];
+            }
+        }
+        buf = std::move(out);
+    }
+    if (flipH) {
+        uint32_t* p = (uint32_t*)buf.px.data();
+        for (int y = 0; y < buf.h; ++y)
+            for (int x = 0; x < buf.w / 2; ++x)
+                std::swap(p[(size_t)y * buf.w + x], p[(size_t)y * buf.w + (buf.w - 1 - x)]);
+    }
+    if (flipV) {
+        size_t row = (size_t)buf.w * 4;
+        std::vector<uint8_t> tmp(row);
+        for (int y = 0; y < buf.h / 2; ++y) {
+            uint8_t* a = buf.px.data() + (size_t)y * row;
+            uint8_t* b = buf.px.data() + (size_t)(buf.h - 1 - y) * row;
+            memcpy(tmp.data(), a, row); memcpy(a, b, row); memcpy(b, tmp.data(), row);
+        }
+    }
+}
+
 void App::copyToClipboard() {
     wstring p = currentPath();
     if (p.empty()) return;
@@ -1134,6 +1191,18 @@ void App::copyToClipboard() {
     std::atomic<uint64_t> live{ j.generation };
     runDecodeJob(j, r, live);
     if (!r.ok || !r.img.valid()) { showToast(T(L"Не вдалося скопіювати")); return; }
+
+    // Copy the picture as it is on screen, not as it is on disk. When nothing
+    // has been changed the two are the same and the file itself is offered too,
+    // which is what makes pasting into Explorer or a mail client work.
+    bool edited = cropActive || rot != 0 || flipH || flipV;
+    if (cropActive) {
+        cropBuf(r.img, (int)lround(cropRect.left), (int)lround(cropRect.top),
+                (int)lround(cropRect.right - cropRect.left),
+                (int)lround(cropRect.bottom - cropRect.top));
+    }
+    if (rot || flipH || flipV) orientBuf(r.img, rot, flipH, flipV);
+    if (!r.img.valid()) { showToast(T(L"Не вдалося скопіювати")); return; }
 
     size_t rowBytes = (size_t)r.img.w * 4;
     size_t total = sizeof(BITMAPINFOHEADER) + rowBytes * r.img.h;
@@ -1167,9 +1236,10 @@ void App::copyToClipboard() {
     }
     GlobalUnlock(hg);
 
-    // Also offer the file itself, so pasting into Explorer or mail works.
+    // Only offer the file when it still matches what is on screen; pasting the
+    // untouched original after a crop would be the opposite of what was asked.
     size_t dropSize = sizeof(DROPFILES) + (p.size() + 2) * sizeof(wchar_t);
-    HGLOBAL hd = GlobalAlloc(GMEM_MOVEABLE, dropSize);
+    HGLOBAL hd = edited ? nullptr : GlobalAlloc(GMEM_MOVEABLE, dropSize);
     if (hd) {
         auto* df = (DROPFILES*)GlobalLock(hd);
         ZeroMemory(df, dropSize);
@@ -1184,7 +1254,7 @@ void App::copyToClipboard() {
         SetClipboardData(CF_DIB, hg);
         if (hd) SetClipboardData(CF_HDROP, hd);
         CloseClipboard();
-        showToast(T(L"Скопійовано в буфер обміну"));
+        showToast(edited ? T(L"Скопійовано як на екрані") : T(L"Скопійовано в буфер обміну"));
     } else {
         GlobalFree(hg);
         if (hd) GlobalFree(hd);

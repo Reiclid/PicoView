@@ -436,6 +436,7 @@ struct Settings {
     bool     muted = false;
     bool     autoPlay = true;
     int      autoSize = 1;         // 0 off, 1 picture to window, 2 window to picture
+    int      autoSizeMax = 75;     // "window to picture": share of the screen it may take
     int      lang = -1;            // -1 = follow the system on first run
     RECT     placement{ 0,0,0,0 };
     bool     maximized = false;
