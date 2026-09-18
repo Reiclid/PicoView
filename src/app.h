@@ -102,6 +102,15 @@ struct App {
     int    previewW = 0, previewH = 0;
     double previewAt = -1;
     double previewWant = -1;
+    bool   previewPending = false;  // a thumbnail decode is in flight
+    float  previewX = -1.f;         // eased x of the thumbnail card
+    float  previewFade = 0.f;       // card fades in instead of popping
+    // Vertical volume flyout, used when the player bar is too narrow for the
+    // inline slider.
+    bool   volPopup = false;
+    double volPopupUntil = 0;
+    float  volAnim = 0.f;           // grow/fade of that flyout
+    D2D1_RECT_F volPopupRect{};
 
     std::unordered_map<wstring, ViewState> viewStates;
     std::deque<wstring> viewStateLru;
@@ -144,6 +153,8 @@ struct App {
     D2D1_RECT_F tipAnchor{};
     Toast  toast;
     bool   animating = false;
+    double frameDt = 0.016;         // seconds since the previous frame
+    float  menuAnim = 0.f;          // flyout grow/fade
     bool   showHelp = false;
     bool   sortMenuOpen = false;
     D2D1_RECT_F sortMenuRect{};

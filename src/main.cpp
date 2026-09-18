@@ -828,6 +828,39 @@ void App::deleteCurrent() {
     invalidate();
 }
 
+// ----------------------------------------------------------- audio / speed
+static const double kRates[] = { 0.5, 0.75, 1.0, 1.25, 1.5, 2.0 };
+static const int    kRateCount = (int)(sizeof(kRates) / sizeof(kRates[0]));
+
+// `wrap` cycles (the button), otherwise the ends hold (wheel and keyboard).
+static void videoStepRate(App& a, int dir, bool wrap) {
+    if (!a.videoMode) return;
+    double cur = a.video.rate();
+    int at = 2;
+    for (int i = 0; i < kRateCount; ++i) if (fabs(kRates[i] - cur) < 0.01) { at = i; break; }
+    int next = wrap ? (at + dir + kRateCount) % kRateCount
+                    : clampi(at + dir, 0, kRateCount - 1);
+    a.video.setRate(kRates[next]);
+    wchar_t b[32];
+    swprintf(b, 32, T(L"Швидкість %.2gx"), kRates[next]);
+    a.showToast(b, 1.2);
+    a.invalidate();
+}
+
+static void videoNudgeVolume(App& a, float delta) {
+    if (!a.videoMode) return;
+    float v = clampf((a.video.muted() ? 0.f : a.video.volume()) + delta, 0.f, 1.f);
+    a.video.setVolume(v);
+    a.video.setMuted(false);
+    a.cfg.volume = clampi((int)lround(v * 100.f), 0, 100);
+    a.cfg.muted = false;
+    a.showToast(T(L"Гучність ") + std::to_wstring(a.cfg.volume) + L"%", 0.9);
+    // Show the flyout too, so the level is visible while it changes.
+    a.volPopup = true;
+    a.volPopupUntil = nowSec() + 1.1;
+    a.invalidate();
+}
+
 // ------------------------------------------------------------------ commands
 void uiOnCommand(App& a, int cmd) {
     auto pic = a.current();
@@ -892,15 +925,7 @@ void uiOnCommand(App& a, int cmd) {
         case CMD_SEEK_BACK: if (a.videoMode) { a.videoSeekBy(-5.0); } break;
         case CMD_SEEK_FWD:  if (a.videoMode) { a.videoSeekBy(+5.0); } break;
         case CMD_SPEED:
-            if (a.videoMode) {
-                static const double rates[] = { 0.5, 0.75, 1.0, 1.25, 1.5, 2.0 };
-                double cur = a.video.rate();
-                int next = 2;
-                for (int i = 0; i < 6; ++i) if (fabs(rates[i] - cur) < 0.01) { next = (i + 1) % 6; break; }
-                a.video.setRate(rates[next]);
-                wchar_t b[32]; swprintf(b, 32, T(L"Швидкість %.2gx"), rates[next]);
-                a.showToast(b, 1.2);
-            }
+            if (a.videoMode) videoStepRate(a, +1, true);
             break;
         case CMD_SLIDESHOW:
             a.slideshow = !a.slideshow;
@@ -953,7 +978,13 @@ void uiOnCommand(App& a, int cmd) {
             break;
         }
 
-        case CMD_MORE: a.moreMenuOpen = !a.moreMenuOpen; a.menuScroll = 0; a.invalidate(); break;
+        case CMD_MORE:
+            a.moreMenuOpen = !a.moreMenuOpen;
+            a.menuScroll = 0;
+            a.menuAnim = 0.f;              // replay the grow-in each time
+            a.requestAnim();
+            a.invalidate();
+            break;
 
         case CMD_PIN:
             a.cfg.alwaysOnTop = !a.cfg.alwaysOnTop;
@@ -1132,7 +1163,7 @@ static void stepAnimations(App& a, double dt) {
     double idle = nowSec() - a.lastMouseMove;
     bool wantBar = (a.view == View::Viewer || a.titleOverlay()) &&
                    (idle < 3.0 || a.hot != 0 || a.in.down || a.seekDragging ||
-                    a.settingsOpen || a.moreMenuOpen || a.showHelp ||
+                    a.settingsOpen || a.moreMenuOpen || a.volPopup || a.showHelp ||
                     (a.videoMode && !a.video.playing()));
     float target = wantBar ? 1.f : 0.f;
     if (fabsf(a.barAlpha - target) > 0.004f) {
@@ -1155,6 +1186,7 @@ static void render(App& a) {
     double t = nowSec();
     double dt = a.lastFrame > 0 ? std::min(0.1, t - a.lastFrame) : 0.016;
     a.lastFrame = t;
+    a.frameDt = dt;          // ui.cpp eases everything against this
 
     D2D1_RECT_F prevCanvas = a.R.canvas;
     if (a.needRelayout) uiLayout(a);
@@ -1216,15 +1248,9 @@ static void onKey(App& a, WPARAM key) {
             case VK_LEFT:  a.videoSeekBy(shift ? -30.0 : -5.0); return;
             case VK_RIGHT: a.videoSeekBy(shift ? +30.0 : +5.0); return;
             case VK_UP:
-            case VK_DOWN: {
-                float v = clampf(a.video.volume() + (key == VK_UP ? 0.05f : -0.05f), 0.f, 1.f);
-                a.video.setVolume(v);
-                a.video.setMuted(false);
-                a.cfg.volume = clampi((int)lround(v * 100.f), 0, 100);
-                a.cfg.muted = false;
-                a.showToast(T(L"Гучність ") + std::to_wstring(a.cfg.volume) + L"%", 0.9);
+            case VK_DOWN:
+                videoNudgeVolume(a, key == VK_UP ? 0.05f : -0.05f);
                 return;
-            }
             case 'M': uiOnCommand(a, CMD_MUTE);
                       a.showToast(a.video.muted() ? T(L"Звук вимкнено") : T(L"Звук увімкнено"), 0.9);
                       return;
@@ -1279,6 +1305,7 @@ static void onKey(App& a, WPARAM key) {
 
 static void onWheel(App& a, int delta, POINT ptClient) {
     bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     a.lastMouseMove = nowSec();
 
     if (a.settingsOpen) {
@@ -1289,6 +1316,14 @@ static void onWheel(App& a, int delta, POINT ptClient) {
     if (a.moreMenuOpen && a.menuScrollMax > 0.f) {
         a.menuScroll = clampf(a.menuScroll - delta * a.gfx.s(0.6f), 0.f, a.menuScrollMax);
         a.invalidate();
+        return;
+    }
+
+    // Ctrl + wheel rides the volume, Ctrl+Shift + wheel the playback speed.
+    // There is nothing to zoom in a video, so the modifier is free here.
+    if (a.videoMode && a.view == View::Viewer && ctrl) {
+        if (shift) videoStepRate(a, delta > 0 ? +1 : -1, false);
+        else       videoNudgeVolume(a, delta > 0 ? 0.05f : -0.05f);
         return;
     }
 

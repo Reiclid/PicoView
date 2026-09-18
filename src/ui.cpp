@@ -11,7 +11,7 @@ namespace ico {
     static const wchar_t* ZoomIn = L"";
     static const wchar_t* ZoomOut = L"";
     static const wchar_t* FitPage = L"";
-    static const wchar_t* Rotate = L"";
+    static const wchar_t* Rotate = L"";   // mirrored for the other direction
     static const wchar_t* Play = L"";
     static const wchar_t* Pause = L"";
     static const wchar_t* FullScr = L"";
@@ -39,14 +39,20 @@ namespace ico {
     static const wchar_t* NextTrack = L"";
     static const wchar_t* Back = L"";
     static const wchar_t* Fwd = L"";
-    static const wchar_t* Volume = L"";
+    static const wchar_t* Volume = L"";
+    static const wchar_t* Vol0 = L"";
+    static const wchar_t* Vol1 = L"";
+    static const wchar_t* Vol2 = L"";
+    static const wchar_t* Vol3 = L"";
+    static const wchar_t* Speed = L"";
+    static const wchar_t* Flip = L"";   // turned 90 deg for the vertical one
     static const wchar_t* Mute = L"";
     static const wchar_t* Video = L"";
     static const wchar_t* More = L"";
     static const wchar_t* Zoom100 = L"";
-    static const wchar_t* AutoOff = L"";
-    static const wchar_t* AutoFit = L"";
-    static const wchar_t* AutoWin = L"";
+    static const wchar_t* AutoOff = L"";
+    static const wchar_t* AutoFit = L"";
+    static const wchar_t* AutoWin = L"";
     static const wchar_t* Settings = L"";
     static const wchar_t* NewWindow = L"";
     static const wchar_t* Check = L"";
@@ -60,9 +66,50 @@ static int    g_hotPrev = 0;
 static double g_hotSince = 0;
 static wstring g_tip;
 static D2D1_RECT_F g_tipAnchor{};
+// An open flyout covers whatever is beneath it; those widgets must not light up.
+static bool   g_blockOn = false;
+static D2D1_RECT_F g_block{};
 
 // Widgets announce the pointer they want; the last (topmost) one drawn wins.
 static inline void useCursor(App& a, LPCWSTR id) { a.wantCursor = id; }
+
+// How much of the way to its target a value moves this frame. `perSec` is the
+// fraction still left after one second, so the motion looks the same at 60 and
+// at 165 Hz instead of racing on a fast display.
+static inline float easeK(App& a, float perSec) {
+    return 1.f - powf(perSec, clampf((float)a.frameDt, 0.f, 0.1f));
+}
+static inline bool easeTo(App& a, float& v, float target, float perSec, float eps = 0.004f) {
+    if (fabsf(v - target) <= eps) { v = target; return false; }
+    v += (target - v) * easeK(a, perSec);
+    a.requestAnim();
+    return true;
+}
+
+// Every clickable surface eases its hover and press state rather than snapping,
+// so the whole UI reacts in one visual language.
+struct WidgetAnim { float hover = 0.f, press = 0.f; };
+static std::unordered_map<int, WidgetAnim> g_wanim;
+
+static void animState(App& a, int id, bool hovered, bool held, float& hv, float& pr) {
+    WidgetAnim& w = g_wanim[id];
+    easeTo(a, w.hover, hovered ? 1.f : 0.f, 1e-7f);
+    easeTo(a, w.press, held ? 1.f : 0.f, 1e-14f);
+    hv = w.hover; pr = w.press;
+}
+
+// Glyph transforms, so one icon can serve a mirrored or turned pair and the set
+// stays visually consistent.
+enum { GX_NONE = 0, GX_MIRROR = 1, GX_ROT90 = 2 };
+
+static D2D1_MATRIX_3X2_F glyphXform(int xf, float press, D2D1_RECT_F r) {
+    D2D1_POINT_2F c{ (r.left + r.right) * .5f, (r.top + r.bottom) * .5f };
+    D2D1::Matrix3x2F m = D2D1::Matrix3x2F::Identity();
+    if (xf == GX_MIRROR)     m = D2D1::Matrix3x2F::Scale(-1.f, 1.f, c);
+    else if (xf == GX_ROT90) m = D2D1::Matrix3x2F::Rotation(90.f, c);
+    if (press > 0.002f) m = m * D2D1::Matrix3x2F::Scale(1.f - press * 0.09f, 1.f - press * 0.09f, c);
+    return m;
+}
 
 static inline bool inRect(const D2D1_RECT_F& r, D2D1_POINT_2F p) {
     return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom;
@@ -107,7 +154,7 @@ enum UiId {
     UI_GH_SORTDIR = 1400, UI_GH_SORT, UI_GH_SMALLER, UI_GH_BIGGER,
     UI_BAR_BASE = 1500,
     UI_V_PREV = 1700, UI_V_BACK, UI_V_PLAY, UI_V_FWD, UI_V_NEXT, UI_V_GRID,
-    UI_V_MUTE, UI_V_VOL, UI_V_SPEED, UI_V_FULL, UI_V_INFO, UI_V_DEL, UI_V_SEEK,
+    UI_V_MUTE, UI_V_VOL, UI_V_VOLV, UI_V_SPEED, UI_V_FULL, UI_V_INFO, UI_V_DEL, UI_V_SEEK,
     UI_V_MORE, UI_BAR_MORE,
     UI_MENU_BASE = 1800,
     UI_SET_BASE = 2000,
@@ -123,42 +170,68 @@ struct BtnStyle {
     float radius = 6.f;
 };
 
-static bool button(App& a, int uid, int cmd, D2D1_RECT_F r, const wchar_t* glyph, const wchar_t* tip,
-                   BtnStyle st = {}, float opacity = 1.f, bool flipGlyph = false) {
-    const int id = uid;
+// Shared by every pill-shaped control: resolves the interaction, eases the
+// hover and press amounts and paints the blended background.
+static bool btnCore(App& a, int id, D2D1_RECT_F r, const BtnStyle& st, float opacity,
+                    D2D1_COLOR_F& bgOut, D2D1_COLOR_F& fgOut, float& pressOut) {
     Gfx& g = a.gfx;
-    bool hovered = st.enabled && inRect(r, a.in.mouse) && a.in.hasMouse;
+    bool blocked = g_blockOn && inRect(g_block, a.in.mouse);
+    bool hovered = st.enabled && !blocked && inRect(r, a.in.mouse) && a.in.hasMouse;
     if (hovered) { g_overUi = true; a.hot = id; useCursor(a, IDC_HAND); }
     bool held = hovered && a.in.down && a.active == id;
     bool clicked = false;
-    if (hovered && a.in.pressed) { a.active = id; }
+    if (hovered && a.in.pressed) a.active = id;
     if (a.in.released && a.active == id) { if (hovered) clicked = true; a.active = 0; }
 
-    D2D1_COLOR_F bg = D2D1::ColorF(0, 0, 0, 0);
-    D2D1_COLOR_F fg = st.enabled ? a.th.text : a.th.textMute;
-    if (st.accentFill) { bg = held ? mix(a.th.accent, a.th.canvas, .18f) : (hovered ? a.th.accentHover : a.th.accent); fg = a.th.accentText; }
-    else if (st.danger && hovered) { bg = held ? a.th.danger : a.th.dangerHover; fg = D2D1::ColorF(1, 1, 1, 1); }
-    else if (st.toggled) { bg = alpha(a.th.accent, hovered ? 0.30f : 0.20f); fg = a.th.accent; }
-    else if (held) bg = a.th.cardPress;
-    else if (hovered) bg = a.th.cardHover;
+    float hv = 0.f, pr = 0.f;
+    animState(a, id, hovered, held, hv, pr);
+    pressOut = pr;
 
-    g.roundRect(r, g.s(st.radius), alpha(bg, opacity));
+    const D2D1_COLOR_F clear = D2D1::ColorF(0, 0, 0, 0);
+    D2D1_COLOR_F rest = clear, hover = clear, press = clear;
+    D2D1_COLOR_F fg = st.enabled ? a.th.text : a.th.textMute;
+    if (st.accentFill) {
+        rest = a.th.accent; hover = a.th.accentHover; press = mix(a.th.accent, a.th.canvas, .18f);
+        fg = a.th.accentText;
+    } else if (st.danger) {
+        hover = a.th.dangerHover; press = a.th.danger;
+        fg = mix(fg, D2D1::ColorF(1, 1, 1, 1), hv);
+    } else if (st.toggled) {
+        rest = alpha(a.th.accent, 0.20f); hover = alpha(a.th.accent, 0.30f); press = alpha(a.th.accent, 0.38f);
+        fg = a.th.accent;
+    } else {
+        hover = a.th.cardHover; press = a.th.cardPress;
+    }
+    bgOut = mix(mix(rest, hover, hv), press, pr);
+    fgOut = fg;
+
+    // A pressed control sinks a little, the way Windows 11 buttons do.
+    D2D1_RECT_F fill = inflate(r, -pr * g.s(1.5f));
+    g.roundRect(fill, g.s(st.radius), alpha(bgOut, opacity));
     if (st.toggled && !st.accentFill) {
-        float w = (r.right - r.left) * 0.34f, cx = (r.left + r.right) * .5f;
+        float w = (r.right - r.left) * 0.34f * (1.f - pr * 0.25f), cx = (r.left + r.right) * .5f;
         g.roundRect({ cx - w / 2, r.bottom - g.s(3.f), cx + w / 2, r.bottom - g.s(1.f) },
                     g.s(1.f), alpha(a.th.accent, opacity));
     }
+    return clicked;
+}
+
+static bool button(App& a, int uid, int cmd, D2D1_RECT_F r, const wchar_t* glyph, const wchar_t* tip,
+                   BtnStyle st = {}, float opacity = 1.f, int xform = GX_NONE) {
+    const int id = uid;
+    Gfx& g = a.gfx;
+    D2D1_COLOR_F bg, fg;
+    float pr = 0.f;
+    bool clicked = btnCore(a, id, r, st, opacity, bg, fg, pr);
 
     if (glyph && *glyph) {
-        if (flipGlyph) {
-            float cx = (r.left + r.right) * .5f;
-            g.dc->SetTransform(D2D1::Matrix3x2F::Scale(-1.f, 1.f, D2D1::Point2F(cx, 0)));
-        }
+        bool xf = (xform != GX_NONE) || pr > 0.002f;
+        if (xf) g.dc->SetTransform(glyphXform(xform, pr, r));
         g.text(glyph, g.fIcon.Get(), r, alpha(fg, opacity), DWRITE_TEXT_ALIGNMENT_CENTER);
-        if (flipGlyph) g.dc->SetTransform(D2D1::Matrix3x2F::Identity());
+        if (xf) g.dc->SetTransform(D2D1::Matrix3x2F::Identity());
     }
 
-    if (hovered && tip && *tip) { g_tip = tip; g_tipAnchor = r; }
+    if (a.hot == id && tip && *tip) { g_tip = tip; g_tipAnchor = r; }
     if (clicked && st.enabled && cmd != CMD_NONE) a.pendingCmd = cmd;
     return clicked && st.enabled;
 }
@@ -167,27 +240,15 @@ static bool textButton(App& a, int uid, int cmd, D2D1_RECT_F r, const wstring& l
                        BtnStyle st = {}, float opacity = 1.f) {
     const int id = uid;
     Gfx& g = a.gfx;
-    bool hovered = st.enabled && inRect(r, a.in.mouse) && a.in.hasMouse;
-    if (hovered) { g_overUi = true; a.hot = id; useCursor(a, IDC_HAND); }
-    bool held = hovered && a.in.down && a.active == id;
-    bool clicked = false;
-    if (hovered && a.in.pressed) a.active = id;
-    if (a.in.released && a.active == id) { if (hovered) clicked = true; a.active = 0; }
+    D2D1_COLOR_F bg, fg;
+    float pr = 0.f;
+    bool clicked = btnCore(a, id, r, st, opacity, bg, fg, pr);
 
-    D2D1_COLOR_F bg = D2D1::ColorF(0, 0, 0, 0), fg = st.enabled ? a.th.text : a.th.textMute;
-    if (st.accentFill) { bg = hovered ? a.th.accentHover : a.th.accent; fg = a.th.accentText; }
-    else if (st.toggled) { bg = alpha(a.th.accent, hovered ? 0.30f : 0.20f); fg = a.th.accent; }
-    else if (held) bg = a.th.cardPress;
-    else if (hovered) bg = a.th.cardHover;
-
-    g.roundRect(r, g.s(st.radius), alpha(bg, opacity));
-    if (st.toggled && !st.accentFill) {
-        float w = (r.right - r.left) * 0.34f, cx = (r.left + r.right) * .5f;
-        g.roundRect({ cx - w / 2, r.bottom - g.s(3.f), cx + w / 2, r.bottom - g.s(1.f) },
-                    g.s(1.f), alpha(a.th.accent, opacity));
-    }
+    if (pr > 0.002f) g.dc->SetTransform(glyphXform(GX_NONE, pr, r));
     g.text(label, g.fBody.Get(), r, alpha(fg, opacity), DWRITE_TEXT_ALIGNMENT_CENTER);
-    if (hovered && tip && *tip) { g_tip = tip; g_tipAnchor = r; }
+    if (pr > 0.002f) g.dc->SetTransform(D2D1::Matrix3x2F::Identity());
+
+    if (a.hot == id && tip && *tip) { g_tip = tip; g_tipAnchor = r; }
     if (clicked && st.enabled && cmd != CMD_NONE) a.pendingCmd = cmd;
     return clicked && st.enabled;
 }
@@ -198,7 +259,8 @@ static bool slider(App& a, int uid, D2D1_RECT_F r, float value, float& out,
                    float opacity, float trackH, bool showKnob = true) {
     Gfx& g = a.gfx;
     D2D1_RECT_F hit = { r.left - g.s(4.f), r.top - g.s(8.f), r.right + g.s(4.f), r.bottom + g.s(8.f) };
-    bool hovered = inRect(hit, a.in.mouse) && a.in.hasMouse;
+    bool blocked = g_blockOn && inRect(g_block, a.in.mouse);
+    bool hovered = !blocked && inRect(hit, a.in.mouse) && a.in.hasMouse;
     if (hovered) { g_overUi = true; a.hot = uid; useCursor(a, IDC_HAND); }
     if (hovered && a.in.pressed) a.active = uid;
     bool dragging = (a.active == uid) && a.in.down;
@@ -210,7 +272,9 @@ static bool slider(App& a, int uid, D2D1_RECT_F r, float value, float& out,
         v = clampf((a.in.mouse.x - r.left) / std::max(1.f, rw(r)), 0.f, 1.f);
     out = v;
 
-    float th = g.s(trackH) * ((hovered || dragging) ? 1.6f : 1.f);
+    float hv = 0.f, pr = 0.f;
+    animState(a, uid, hovered, dragging, hv, pr);
+    float th = g.s(trackH) * (1.f + 0.6f * std::max(hv, pr));
     float cy = (r.top + r.bottom) * .5f;
     D2D1_RECT_F track = { r.left, cy - th * .5f, r.right, cy + th * .5f };
     g.roundRect(track, th * .5f, alpha(a.th.text, opacity * 0.22f));
@@ -218,11 +282,46 @@ static bool slider(App& a, int uid, D2D1_RECT_F r, float value, float& out,
     D2D1_RECT_F fill = { r.left, track.top, r.left + rw(r) * v, track.bottom };
     if (fill.right > fill.left) g.roundRect(fill, th * .5f, alpha(a.th.accent, opacity));
 
-    if (showKnob && (hovered || dragging)) {
-        float kr = g.s(6.f);
+    float kg = std::max(hv, pr);
+    if (showKnob && kg > 0.01f) {
+        float kr = g.s(6.f) * kg;
         g.dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(fill.right, cy), kr, kr),
                           g.solid(alpha(a.th.accent, opacity)));
     }
+    return dragging;
+}
+
+// Vertical twin of `slider`, full at the top. Used by the volume flyout.
+static bool vslider(App& a, int uid, D2D1_RECT_F r, float value, float& out,
+                    float opacity, float trackW, bool live = true) {
+    Gfx& g = a.gfx;
+    D2D1_RECT_F hit = { r.left - g.s(10.f), r.top - g.s(6.f), r.right + g.s(10.f), r.bottom + g.s(6.f) };
+    bool hovered = live && inRect(hit, a.in.mouse) && a.in.hasMouse;
+    if (hovered) { g_overUi = true; a.hot = uid; useCursor(a, IDC_HAND); }
+    if (hovered && a.in.pressed) a.active = uid;
+    bool dragging = (a.active == uid) && a.in.down;
+    if (dragging) useCursor(a, IDC_HAND);
+    if (a.active == uid && a.in.released) { dragging = false; a.active = 0; }
+
+    float v = clampf(value, 0.f, 1.f);
+    if (dragging) v = 1.f - clampf((a.in.mouse.y - r.top) / std::max(1.f, rh(r)), 0.f, 1.f);
+    out = v;
+
+    float hv = 0.f, pr = 0.f;
+    animState(a, uid, hovered, dragging, hv, pr);
+    float tw = g.s(trackW) * (1.f + 0.6f * std::max(hv, pr));
+    float cx = (r.left + r.right) * .5f;
+    D2D1_RECT_F track = { cx - tw * .5f, r.top, cx + tw * .5f, r.bottom };
+    g.roundRect(track, tw * .5f, alpha(a.th.text, opacity * 0.22f));
+
+    float fy = r.bottom - rh(r) * v;
+    if (r.bottom > fy)
+        g.roundRect({ track.left, fy, track.right, r.bottom }, tw * .5f, alpha(a.th.accent, opacity));
+
+    float kg = std::max(hv, pr);
+    if (kg > 0.01f)
+        g.dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, fy), g.s(6.f) * kg, g.s(6.f) * kg),
+                          g.solid(alpha(a.th.accent, opacity)));
     return dragging;
 }
 
@@ -244,6 +343,7 @@ struct MenuEntry {
     bool           toggled = false;
     bool           enabled = true;
     bool           separator = false;
+    int            xform = 0;      // GX_* - lets one glyph serve a mirrored pair
 };
 
 // Windows 11 style flyout, anchored to a button on the bottom bar so it opens
@@ -279,6 +379,18 @@ static void popupMenu(App& a, int uidBase, D2D1_RECT_F anchor,
     D2D1_RECT_F m = rectOf(x, y, w, h);
     a.moreMenuBounds = m;
 
+    // Windows 11 flyouts grow into place instead of appearing whole.
+    easeTo(a, a.menuAnim, 1.f, 2e-10f, 0.002f);
+    float op = clampf(a.menuAnim * 1.35f, 0.f, 1.f);
+    bool animating = a.menuAnim < 0.999f;
+    if (animating) {
+        float dy = (1.f - a.menuAnim) * g.s(10.f) * (y < anchor.top ? 1.f : -1.f);
+        g.dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), nullptr,
+                                               D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                               D2D1::IdentityMatrix(), op), nullptr);
+        g.dc->SetTransform(D2D1::Matrix3x2F::Translation(0.f, dy));
+    }
+
     shadowPill(g, m, g.s(8.f), a.th.shadow, 1.f);
     g.roundRect(m, g.s(8.f), alpha(a.th.bar, 0.99f));
     g.roundRectStroke(m, g.s(8.f), a.th.barStroke, g.s(1.f));
@@ -308,8 +420,10 @@ static void popupMenu(App& a, int uidBase, D2D1_RECT_F anchor,
         D2D1_COLOR_F fg = it.enabled ? a.th.text : a.th.textMute;
         if (it.glyph) {
             IDWriteTextFormat* gf = (it.glyph[0] >= 0xE000) ? g.fIcon.Get() : g.fBody.Get();
-            g.text(it.glyph, gf, rectOf(ir.left + g.s(8.f), ir.top, g.s(26.f), ih),
-                   it.toggled ? a.th.accent : fg, DWRITE_TEXT_ALIGNMENT_CENTER);
+            D2D1_RECT_F gr = rectOf(ir.left + g.s(8.f), ir.top, g.s(26.f), ih);
+            if (it.xform != GX_NONE) g.dc->SetTransform(glyphXform(it.xform, 0.f, gr));
+            g.text(it.glyph, gf, gr, it.toggled ? a.th.accent : fg, DWRITE_TEXT_ALIGNMENT_CENTER);
+            if (it.xform != GX_NONE) g.dc->SetTransform(D2D1::Matrix3x2F::Identity());
         }
         g.text(it.label, g.fBody.Get(), rectOf(ir.left + g.s(42.f), ir.top, rw(ir) - g.s(50.f), ih), fg);
         if (!it.hint.empty())
@@ -327,6 +441,11 @@ static void popupMenu(App& a, int uidBase, D2D1_RECT_F anchor,
         float t = a.menuScroll / a.menuScrollMax;
         g.roundRect(rectOf(m.right - g.s(7.f), m.top + g.s(5.f) + t * (trackH - thumbH),
                            g.s(3.f), thumbH), g.s(1.5f), alpha(a.th.text, 0.30f));
+    }
+
+    if (animating) {
+        g.dc->SetTransform(D2D1::Matrix3x2F::Identity());
+        g.dc->PopLayer();
     }
 
     if (a.in.pressed && !inRect(m, a.in.mouse) && !inRect(anchor, a.in.mouse)) open = false;
@@ -351,9 +470,9 @@ static std::vector<MenuEntry> buildActionMenu(App& a, bool forVideo) {
     bool has = forVideo ? a.video.isOpen() : (a.current() && a.current()->bmp && !a.current()->failed);
     std::vector<MenuEntry> v;
     auto add = [&](int cmd, const wchar_t* glyph, const wchar_t* label, const wchar_t* hint,
-                   bool toggled = false, bool enabled = true) {
+                   bool toggled = false, bool enabled = true, int xform = GX_NONE) {
         MenuEntry e; e.cmd = cmd; e.glyph = glyph; e.label = label; e.hint = hint ? hint : L"";
-        e.toggled = toggled; e.enabled = enabled;
+        e.toggled = toggled; e.enabled = enabled; e.xform = xform;
         v.push_back(std::move(e));
     };
     auto sep = [&] { MenuEntry e; e.separator = true; v.push_back(std::move(e)); };
@@ -362,11 +481,19 @@ static std::vector<MenuEntry> buildActionMenu(App& a, bool forVideo) {
     add(CMD_ACTUAL, ico::Zoom100, T(L"Масштаб 100%"), L"1", a.fitMode == Fit::Actual, has);
     add(CMD_AUTOSIZE, autoSizeGlyph(a.cfg.autoSize), autoSizeLabel(a.cfg.autoSize), L"A");
     sep();
-    add(CMD_ROT_L, ico::Rotate, T(L"Обернути ліворуч"), L"Shift+R", false, has);
+    add(CMD_ROT_L, ico::Rotate, T(L"Обернути ліворуч"), L"Shift+R", false, has, GX_MIRROR);
     add(CMD_ROT_R, ico::Rotate, T(L"Обернути праворуч"), L"R", false, has);
-    add(CMD_FLIP_H, L"⇄", T(L"Дзеркально по горизонталі"), L"H", a.flipH, has);
-    add(CMD_FLIP_V, L"⇅", T(L"Дзеркально по вертикалі"), L"V", a.flipV, has);
+    add(CMD_FLIP_H, ico::Flip, T(L"Дзеркально по горизонталі"), L"H", a.flipH, has);
+    add(CMD_FLIP_V, ico::Flip, T(L"Дзеркально по вертикалі"), L"V", a.flipV, has, GX_ROT90);
     sep();
+    if (forVideo) {
+        wchar_t sp[24];
+        swprintf(sp, 24, T(L"Швидкість %.2gx"), a.video.rate());
+        add(CMD_SPEED, ico::Speed, sp, L"S", fabs(a.video.rate() - 1.0) > 0.01, a.video.isOpen());
+        add(CMD_MUTE, a.video.muted() ? ico::Mute : ico::Volume,
+            a.video.muted() ? T(L"Увімкнути звук") : T(L"Вимкнути звук"), L"M", a.video.muted());
+        sep();
+    }
     add(CMD_GRID, ico::Grid, T(L"Сітка папки"), L"G");
     add(CMD_FILMSTRIP, ico::Film, T(L"Стрічка кадрів"), L"T", a.cfg.filmstrip, a.folder.count() > 1);
     add(CMD_INFO, ico::Info, T(L"Відомості"), L"I", a.cfg.infoPanel);
@@ -463,14 +590,16 @@ static void drawTitlebar(App& a) {
 
     // Left cluster: back to grid / open.
     if (a.view == View::Viewer) {
-        button(a, UI_TB_GRID, CMD_GRID, rectOf(x, cy - bs / 2, bs, bs), ico::Grid, T(L"Сітка папки  (G)"));
+        button(a, UI_TB_GRID, CMD_GRID, rectOf(x, cy - bs / 2, bs, bs), ico::Grid, T(L"Сітка папки  (G)"),
+               {}, top);
         x += bs + g.s(2.f);
     } else {
         button(a, UI_TB_VIEWER, CMD_VIEWER, rectOf(x, cy - bs / 2, bs, bs), ico::Photo, T(L"Переглядач  (Esc)"),
-               { false, a.folder.count() > 0 });
+               { false, a.folder.count() > 0 }, top);
         x += bs + g.s(2.f);
     }
-    button(a, UI_TB_OPEN, CMD_OPEN, rectOf(x, cy - bs / 2, bs, bs), ico::OpenFile, T(L"Відкрити файл  (Ctrl+O)"));
+    button(a, UI_TB_OPEN, CMD_OPEN, rectOf(x, cy - bs / 2, bs, bs), ico::OpenFile, T(L"Відкрити файл  (Ctrl+O)"),
+           {}, top);
     x += bs + g.s(10.f);
 
     // Title text.
@@ -503,14 +632,14 @@ static void drawTitlebar(App& a) {
     float availW = std::max(g.s(40.f), availR - x);
     float tW = std::min(availW, g.measure(title, g.fBodyStrong.Get()).width);
     wstring t = fitText(g, title, g.fBodyStrong.Get(), availW);
-    g.text(t, g.fBodyStrong.Get(), rectOf(x, r.top, availW, rh(r)), a.th.text);
+    g.text(t, g.fBodyStrong.Get(), rectOf(x, r.top, availW, rh(r)), alpha(a.th.text, top));
 
     if (!sub.empty()) {
         float sx = x + tW + g.s(12.f);
         float sw = availR - sx;
         if (sw > g.s(60.f))
             g.text(fitText(g, sub, g.fCaption.Get(), sw), g.fCaption.Get(),
-                   rectOf(sx, r.top, sw, rh(r)), a.th.textDim);
+                   rectOf(sx, r.top, sw, rh(r)), alpha(a.th.textDim, top));
     }
 
     // Right cluster before the window buttons.
@@ -518,18 +647,20 @@ static void drawTitlebar(App& a) {
     // shortcut sheet live in Settings.
     float rx = a.R.btnMin.left - g.s(4.f) - bs;
     button(a, UI_SET_BASE + 200, CMD_SETTINGS, rectOf(rx, cy - bs / 2, bs, bs), ico::Settings,
-           T(L"Налаштування  (Ctrl+,)"), { a.settingsOpen });
+           T(L"Налаштування  (Ctrl+,)"), { a.settingsOpen }, top);
     rx -= bs + g.s(2.f);
     button(a, UI_SET_BASE + 201, CMD_PIN, rectOf(rx, cy - bs / 2, bs, bs),
            a.cfg.alwaysOnTop ? ico::Unpin : ico::Pin,
            a.cfg.alwaysOnTop ? T(L"Відкріпити  (P)") : T(L"Поверх усіх вікон  (P)"),
-           { a.cfg.alwaysOnTop });
+           { a.cfg.alwaysOnTop }, top);
 
     // Window buttons.
     bool zoomed = IsZoomed(a.hwnd) != 0;
-    button(a, UI_TB_MIN, CMD_MINIMIZE, a.R.btnMin, ico::Min, nullptr, { false, true, false, false, 0.f });
-    button(a, UI_TB_MAX, CMD_MAXIMIZE, a.R.btnMax, zoomed ? ico::Restore : ico::Max, nullptr, { false, true, false, false, 0.f });
-    button(a, UI_TB_CLOSE, CMD_CLOSE, a.R.btnClose, ico::Close, nullptr, { false, true, true, false, 0.f });
+    button(a, UI_TB_MIN, CMD_MINIMIZE, a.R.btnMin, ico::Min, nullptr, { false, true, false, false, 0.f }, top);
+    button(a, UI_TB_MAX, CMD_MAXIMIZE, a.R.btnMax, zoomed ? ico::Restore : ico::Max, nullptr,
+           { false, true, false, false, 0.f }, top);
+    button(a, UI_TB_CLOSE, CMD_CLOSE, a.R.btnClose, ico::Close, nullptr,
+           { false, true, true, false, 0.f }, top);
 }
 
 // --------------------------------------------------------------- viewer
@@ -547,16 +678,38 @@ static void drawCheckerboard(Gfx& g, D2D1_RECT_F r, const Theme& th) {
     g.dc->PopAxisAlignedClip();
 }
 
+// Fluent progress ring: one arc that sweeps around a faint track, its length
+// breathing as it turns. Replaces the old ring of blinking dots.
 static void drawSpinner(Gfx& g, D2D1_POINT_2F c, float radius, const D2D1_COLOR_F& col, double t) {
-    const int N = 8;
-    for (int i = 0; i < N; ++i) {
-        double ph = t * 1.6 - i * 0.12;
-        float amt = (float)(0.25 + 0.75 * (0.5 + 0.5 * cos(ph * 3.14159 * 2.0)));
-        float ang = (float)(i * 2.0 * 3.14159265 / N);
-        float rr = g.s(2.4f);
-        D2D1_POINT_2F p{ c.x + cosf(ang) * radius, c.y + sinf(ang) * radius };
-        g.dc->FillEllipse(D2D1::Ellipse(p, rr, rr), g.solid(alpha(col, amt * 0.9f)));
+    float th = std::max(g.s(1.6f), radius * 0.20f);
+    g.dc->DrawEllipse(D2D1::Ellipse(c, radius, radius), g.solid(alpha(col, 0.16f)), th);
+
+    double spin = t * 1.05;
+    float sweep = (float)(105.0 + 80.0 * (0.5 - 0.5 * cos(spin * 2.6)));
+    float start = (float)fmod(spin * 260.0, 360.0) - sweep * .5f;
+
+    ComPtr<ID2D1PathGeometry> path;
+    if (FAILED(g.d2dFactory->CreatePathGeometry(&path))) return;
+    ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(path->Open(&sink))) return;
+    auto at = [&](float deg) {
+        float rad = deg * 3.14159265f / 180.f;
+        return D2D1::Point2F(c.x + cosf(rad) * radius, c.y + sinf(rad) * radius);
+    };
+    sink->BeginFigure(at(start), D2D1_FIGURE_BEGIN_HOLLOW);
+    sink->AddArc(D2D1::ArcSegment(at(start + sweep), D2D1::SizeF(radius, radius), 0.f,
+                                  D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                                  sweep > 180.f ? D2D1_ARC_SIZE_LARGE : D2D1_ARC_SIZE_SMALL));
+    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+    sink->Close();
+
+    static ComPtr<ID2D1StrokeStyle> round;
+    if (!round) {
+        D2D1_STROKE_STYLE_PROPERTIES sp = D2D1::StrokeStyleProperties();
+        sp.startCap = sp.endCap = D2D1_CAP_STYLE_ROUND;
+        g.d2dFactory->CreateStrokeStyle(sp, nullptr, 0, &round);
     }
+    g.dc->DrawGeometry(path.Get(), g.solid(alpha(col, 0.95f)), th, round.Get());
 }
 
 static void drawEmptyState(App& a, D2D1_RECT_F r) {
@@ -754,7 +907,7 @@ struct BarItem {
     bool         toggled = false;
     bool         enabled = true;
     bool         danger = false;
-    bool         flip = false;
+    int          xform = 0;  // GX_* applied to the glyph
     int          drop = 0;   // higher = dropped first when space runs out
     float        width = 40.f;
     bool         separator = false;
@@ -792,17 +945,17 @@ static void drawCommandBar(App& a) {
     items.push_back({ CMD_AUTOSIZE, autoSizeGlyph(a.cfg.autoSize), autoSizeTip(a.cfg.autoSize), L"",
                       a.cfg.autoSize != 0, true, false, false, 3 });
     sep(5);
-    items.push_back({ CMD_ROT_L, ico::Rotate, T(L"Обернути ліворуч  (Shift+R)"), L"", false, has, false, true, 5 });
-    items.push_back({ CMD_ROT_R, ico::Rotate, T(L"Обернути праворуч  (R)"), L"", false, has, false, false, 5 });
+    items.push_back({ CMD_ROT_L, ico::Rotate, T(L"Обернути ліворуч  (Shift+R)"), L"", false, has, false, GX_MIRROR, 5 });
+    items.push_back({ CMD_ROT_R, ico::Rotate, T(L"Обернути праворуч  (R)"), L"", false, has, false, GX_NONE, 5 });
 
-    BarItem fh{}; fh.cmd = CMD_FLIP_H; fh.glyph = nullptr; fh.label = L"\u21C4";
+    BarItem fh{}; fh.cmd = CMD_FLIP_H; fh.glyph = ico::Flip;
     fh.tip = T(L"Дзеркально по горизонталі  (H)"); fh.toggled = a.flipH; fh.enabled = has;
-    fh.drop = 6; fh.width = 36.f;
+    fh.drop = 6; fh.width = 38.f;
     items.push_back(fh);
 
-    BarItem fv{}; fv.cmd = CMD_FLIP_V; fv.glyph = nullptr; fv.label = L"\u21C5";
+    BarItem fv{}; fv.cmd = CMD_FLIP_V; fv.glyph = ico::Flip; fv.xform = GX_ROT90;
     fv.tip = T(L"Дзеркально по вертикалі  (V)"); fv.toggled = a.flipV; fv.enabled = has;
-    fv.drop = 6; fv.width = 36.f;
+    fv.drop = 6; fv.width = 38.f;
     items.push_back(fv);
     sep(7);
     items.push_back({ CMD_SLIDESHOW, a.slideshow ? ico::Pause : ico::Play,
@@ -859,10 +1012,20 @@ static void drawCommandBar(App& a) {
         D2D1_RECT_F r = rectOf(x, cy - g.s(17.f), w, g.s(34.f));
         if (it.cmd == CMD_MORE) a.moreMenuAnchor = r;
         BtnStyle st{ it.toggled, it.enabled, it.danger, false, 6.f };
-        if (it.glyph) button(a, it.uid, it.cmd, r, it.glyph, it.tip, st, op, it.flip);
+        if (it.glyph) button(a, it.uid, it.cmd, r, it.glyph, it.tip, st, op, it.xform);
         else          textButton(a, it.uid, it.cmd, r, it.label, it.tip, st, op);
         x += w + g.s(5.f);
     }
+}
+
+// The speaker icon follows the level, like the Windows volume flyout.
+static const wchar_t* volumeGlyph(const App& a) {
+    if (a.video.muted()) return ico::Mute;
+    float v = a.video.volume();
+    if (v <= 0.005f) return ico::Vol0;
+    if (v < 0.34f)   return ico::Vol1;
+    if (v < 0.67f)   return ico::Vol2;
+    return ico::Vol3;
 }
 
 // --------------------------------------------------------------- video bar
@@ -906,13 +1069,21 @@ static void drawVideoBar(App& a) {
     if (live && dur > 0 && overSeek && op > 0.4f) {
         wstring path = a.currentPath();
         if (a.preview.path() != path) {
-            a.preview.open(path, 260);
+            a.preview.open(path, 320);
             a.previewWant = a.previewAt = -1;
+            a.previewPending = false;
             a.previewBmp.Reset();
+            a.previewX = -1.f;
+            a.previewFade = 0.f;
         }
         double tHover = clampf((a.in.mouse.x - seek.left) / std::max(1.f, rw(seek)), 0.f, 1.f) * dur;
-        if (a.previewWant < 0 || fabs(tHover - a.previewWant) > std::max(0.2, dur / 600.0)) {
+        // Ask again once the cursor has moved a few pixels along the track. The
+        // old test was a slice of the running time, so on a long clip the card
+        // simply refused to update until you swept a long way across it.
+        double perPx = dur / std::max(1.0, (double)rw(seek));
+        if (a.previewWant < 0 || fabs(tHover - a.previewWant) > std::max(0.05, perPx * 3.0)) {
             a.previewWant = tHover;
+            a.previewPending = true;
             a.preview.request(tHover);
         }
 
@@ -923,40 +1094,61 @@ static void drawVideoBar(App& a) {
             a.previewW = got.w;
             a.previewH = got.h;
             a.previewAt = gotAt;
+            a.previewPending = false;
         }
-        if (!a.previewBmp) a.requestAnim();
+        // The decoder lives on its own thread and cannot repaint us, so the
+        // frame loop has to stay awake while a request is outstanding -
+        // otherwise the frame only appeared on the next mouse move.
+        if (a.previewPending || !a.previewBmp) a.requestAnim();
 
-        if (a.previewBmp && a.previewW > 0) {
-            float tw = g.s(180.f);
-            float th = tw * a.previewH / std::max(1, a.previewW);
-            float padc = g.s(5.f), capH = g.s(20.f);
-            float cw2 = tw + padc * 2, ch2 = th + capH + padc * 2;
-            float cxp = clampf(a.in.mouse.x - cw2 * .5f,
-                               a.R.canvas.left + g.s(8.f),
-                               std::max(a.R.canvas.left + g.s(8.f), a.R.canvas.right - cw2 - g.s(8.f)));
-            float cyp = bar.top - ch2 - g.s(10.f);   // clear of the bar, not just the track
-            D2D1_RECT_F card = rectOf(cxp, cyp, cw2, ch2);
+        float tw = g.s(184.f);
+        float ar = 9.f / 16.f;
+        if (a.previewBmp && a.previewW > 0) ar = (float)a.previewH / (float)a.previewW;
+        else if (a.video.width() > 0)       ar = (float)a.video.height() / (float)a.video.width();
+        float th = tw * clampf(ar, 0.25f, 2.2f);
 
-            shadowPill(g, card, g.s(8.f), a.th.shadow, op);
-            g.roundRect(card, g.s(8.f), alpha(a.th.bar, op));
-            g.roundRectStroke(card, g.s(8.f), alpha(a.th.barStroke, op), g.s(1.f));
-            D2D1_RECT_F ir = rectOf(cxp + padc, cyp + padc, tw, th);
-            float irr = g.s(5.f);
+        float padc = g.s(5.f), capH = g.s(20.f);
+        float cw2 = tw + padc * 2, ch2 = th + capH + padc * 2;
+        float wantX = clampf(a.in.mouse.x - cw2 * .5f,
+                             a.R.canvas.left + g.s(8.f),
+                             std::max(a.R.canvas.left + g.s(8.f), a.R.canvas.right - cw2 - g.s(8.f)));
+        if (a.previewX < 0.f) a.previewX = wantX;
+        easeTo(a, a.previewX, wantX, 1e-12f, 0.3f);      // glides with the cursor
+        easeTo(a, a.previewFade, 1.f, 1e-9f, 0.003f);
+
+        float cxp = a.previewX;
+        float cyp = bar.top - ch2 - g.s(10.f);   // clear of the bar, not just the track
+        float cop = op * a.previewFade;
+        D2D1_RECT_F card = rectOf(cxp, cyp, cw2, ch2);
+
+        shadowPill(g, card, g.s(8.f), a.th.shadow, cop);
+        g.roundRect(card, g.s(8.f), alpha(a.th.bar, cop));
+        g.roundRectStroke(card, g.s(8.f), alpha(a.th.barStroke, cop), g.s(1.f));
+        D2D1_RECT_F ir = rectOf(cxp + padc, cyp + padc, tw, th);
+        float irr = g.s(5.f);
+        if (a.previewBmp) {
             g.pushRoundClip(ir, irr);
-            g.dc->DrawBitmap(a.previewBmp.Get(), ir, op, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+            g.dc->DrawBitmap(a.previewBmp.Get(), ir, cop, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
             g.popRoundClip();
-            g.roundRectStroke(ir, irr, alpha(a.th.barStroke, op), g.s(1.f));
-            g.text(formatTime(tHover), g.fCaption.Get(),
-                   rectOf(cxp, cyp + padc + th, cw2, capH), alpha(a.th.text, op),
-                   DWRITE_TEXT_ALIGNMENT_CENTER);
-
-            // a tick showing exactly where that frame sits on the track
-            float markX = clampf(a.in.mouse.x, seek.left, seek.right);
-            g.roundRect(rectOf(markX - g.s(1.f), seek.top + g.s(1.f), g.s(2.f), rh(seek) - g.s(2.f)),
-                        g.s(1.f), alpha(a.th.text, op * 0.75f));
+        } else {
+            g.roundRect(ir, irr, alpha(a.th.card, cop));
+            drawSpinner(g, D2D1::Point2F((ir.left + ir.right) * .5f, (ir.top + ir.bottom) * .5f),
+                        g.s(11.f), alpha(a.th.textDim, cop), nowSec());
         }
-    } else if (a.previewWant >= 0 && !overSeek) {
+        g.roundRectStroke(ir, irr, alpha(a.th.barStroke, cop), g.s(1.f));
+        g.text(formatTime(tHover), g.fCaption.Get(),
+               rectOf(cxp, cyp + padc + th, cw2, capH), alpha(a.th.text, cop),
+               DWRITE_TEXT_ALIGNMENT_CENTER);
+
+        // a tick showing exactly where that frame sits on the track
+        float markX = clampf(a.in.mouse.x, seek.left, seek.right);
+        g.roundRect(rectOf(markX - g.s(1.f), seek.top + g.s(1.f), g.s(2.f), rh(seek) - g.s(2.f)),
+                    g.s(1.f), alpha(a.th.text, cop * 0.75f));
+    } else if (!overSeek) {
         a.previewWant = -1;
+        a.previewPending = false;
+        a.previewFade = 0.f;
+        a.previewX = -1.f;
     }
 
     // ---- controls row
@@ -992,70 +1184,127 @@ static void drawVideoBar(App& a) {
            T(L"Наступний файл  (PgDn)"), { false, multi }, op);
 
     // Right-hand cluster stays lean: everything else lives behind the "more"
-    // flyout so the player bar does not turn into a wall of icons.
+    // flyout so the player bar does not turn into a wall of icons. The speaker
+    // is the one control that is never dropped - when the inline slider no
+    // longer fits it grows a vertical one on hover instead.
     const float gap = g.s(6.f);
     const float wSpeed = g.s(40.f);
-    const float wVol = bs + g.s(6.f) + g.s(58.f) + g.s(4.f) + g.s(38.f);
+    const float wPct = g.s(38.f), wVolTrack = g.s(58.f);
+    const float wVolInline = wPct + g.s(4.f) + wVolTrack;
 
-    float rx = bar.right - pad - bs;
-    float roomRight = rx + bs - (x + bs + g.s(20.f));
+    float roomRight = bar.right - pad - (x + bs + g.s(20.f));
 
-    bool onFull = true, onSpeed = true, onVol = true;
+    bool onFull = true, onSpeed = true, onVolInline = true;
     auto total = [&] {
-        float t = bs; int n = 1;                    // "more" is never dropped
-        if (onFull)  { t += bs;     ++n; }
-        if (onSpeed) { t += wSpeed; ++n; }
-        if (onVol)   { t += wVol;   ++n; }
-        return t + gap * std::max(0, n - 1);
+        float t = bs + gap + bs;                    // "more" + speaker
+        if (onFull)      t += bs + gap;
+        if (onSpeed)     t += wSpeed + gap;
+        if (onVolInline) t += wVolInline + gap;
+        return t;
     };
+    if (total() > roomRight) onVolInline = false;
     if (total() > roomRight) onSpeed = false;
-    if (total() > roomRight) onVol = false;
     if (total() > roomRight) onFull = false;
 
-    a.moreMenuAnchor = rectOf(rx, cyRow - bs / 2, bs, bs);
+    float rx = bar.right - pad;                     // right edge of the next slot
+    auto slot = [&](float w) {
+        rx -= w;
+        D2D1_RECT_F r = rectOf(rx, cyRow - bs / 2, w, bs);
+        rx -= gap;
+        return r;
+    };
+    float vol = a.video.muted() ? 0.f : a.video.volume();
+
+    a.moreMenuAnchor = slot(bs);
     button(a, UI_V_MORE, CMD_MORE, a.moreMenuAnchor, ico::More,
            T(L"Більше"), { a.moreMenuOpen }, op);
-    rx -= bs + gap;
 
-    if (onFull) {
-        button(a, UI_V_FULL, CMD_FULLSCREEN, rectOf(rx, cyRow - bs / 2, bs, bs),
+    if (onFull)
+        button(a, UI_V_FULL, CMD_FULLSCREEN, slot(bs),
                a.fullscreen ? ico::BackWin : ico::FullScr, T(L"На весь екран  (F11)"),
                { a.fullscreen }, op);
-        rx -= bs + gap;
-    }
+
     if (onSpeed) {
         wchar_t sp[16];
         swprintf(sp, 16, L"%.2gx", a.video.rate());
-        rx -= wSpeed - bs;
-        textButton(a, UI_V_SPEED, CMD_SPEED, rectOf(rx, cyRow - bs / 2, wSpeed, bs),
-                   sp, T(L"Швидкість  (S)"), { fabs(a.video.rate() - 1.0) > 0.01, live }, op);
-        rx -= gap;
+        textButton(a, UI_V_SPEED, CMD_SPEED, slot(wSpeed),
+                   sp, T(L"Швидкість  (S / Ctrl+Shift+колесо)"),
+                   { fabs(a.video.rate() - 1.0) > 0.01, live }, op);
     }
-    if (onVol) {
-        float vol = a.video.muted() ? 0.f : a.video.volume();
 
-        float pw = g.s(38.f);
-        rx -= pw;
+    if (onVolInline) {
         g.text(std::to_wstring(clampi((int)lround(vol * 100.f), 0, 100)) + L"%", g.fCaption.Get(),
-               rectOf(rx, cyRow - bs / 2, pw, bs), alpha(a.th.textDim, op),
-               DWRITE_TEXT_ALIGNMENT_TRAILING);
-        rx -= g.s(4.f);
-
-        float sw = g.s(58.f);
-        rx -= sw;
+               slot(wPct), alpha(a.th.textDim, op), DWRITE_TEXT_ALIGNMENT_TRAILING);
+        rx += gap - g.s(4.f);                       // percent hugs its slider
+        D2D1_RECT_F sr = slot(wVolTrack);
         float outVol = vol;
-        if (slider(a, UI_V_VOL, rectOf(rx, cyRow - g.s(7.f), sw, g.s(14.f)), vol, outVol, op, 4.f)) {
+        if (slider(a, UI_V_VOL, rectOf(sr.left, cyRow - g.s(7.f), rw(sr), g.s(14.f)),
+                   vol, outVol, op, 4.f)) {
             a.video.setVolume(outVol);
             a.video.setMuted(false);
             a.cfg.volume = clampi((int)lround(outVol * 100.f), 0, 100);
             a.cfg.muted = false;
         }
-        rx -= g.s(6.f) + bs;
+    }
 
-        button(a, UI_V_MUTE, CMD_MUTE, rectOf(rx, cyRow - bs / 2, bs, bs),
-               a.video.muted() ? ico::Mute : ico::Volume,
-               a.video.muted() ? T(L"Увімкнути звук  (M)") : T(L"Вимкнути звук  (M)"),
-               { a.video.muted() }, op);
+    D2D1_RECT_F volBtn = slot(bs);
+    button(a, UI_V_MUTE, CMD_MUTE, volBtn, volumeGlyph(a),
+           a.volPopup ? nullptr
+                      : (a.video.muted() ? T(L"Увімкнути звук  (M)") : T(L"Вимкнути звук  (M)")),
+           { a.video.muted() }, op);
+
+    // ---- vertical volume flyout (narrow bar)
+    if (!onVolInline) {
+        bool overBtn = a.in.hasMouse && inRect(inflate(volBtn, g.s(4.f)), a.in.mouse);
+        bool overPop = a.volPopup && a.in.hasMouse &&
+                       inRect(inflate(a.volPopupRect, g.s(10.f)), a.in.mouse);
+        bool holding = (a.active == UI_V_VOLV);
+        if (overBtn || overPop || holding) { a.volPopup = true; a.volPopupUntil = nowSec() + 0.35; }
+        else if (a.volPopup) {
+            if (nowSec() > a.volPopupUntil) a.volPopup = false;
+            else a.requestAnim();                   // wait out the grace period
+        }
+        if (op <= 0.05f) a.volPopup = false;
+    } else if (a.volPopup && nowSec() > a.volPopupUntil) {
+        a.volPopup = false;
+    }
+
+    easeTo(a, a.volAnim, (a.volPopup && !onVolInline) ? 1.f : 0.f, 4e-10f, 0.003f);
+    if (a.volAnim > 0.003f) {
+        float pw = g.s(46.f), ph = g.s(152.f);
+        D2D1_RECT_F pop = rectOf((volBtn.left + volBtn.right) * .5f - pw * .5f,
+                                 volBtn.top - ph - g.s(8.f), pw, ph);
+        a.volPopupRect = pop;
+        if (a.volPopup) g_overUi = true;
+
+        // Grows out of the speaker button rather than appearing whole.
+        float grow = 0.88f + 0.12f * a.volAnim;
+        float vop = op * clampf(a.volAnim * 1.3f, 0.f, 1.f);
+        bool anim = a.volAnim < 0.999f;
+        if (anim)
+            g.dc->SetTransform(D2D1::Matrix3x2F::Scale(
+                grow, grow, D2D1::Point2F((pop.left + pop.right) * .5f, pop.bottom)));
+
+        shadowPill(g, pop, g.s(10.f), a.th.shadow, vop);
+        g.roundRect(pop, g.s(10.f), alpha(a.th.bar, vop));
+        g.roundRectStroke(pop, g.s(10.f), alpha(a.th.barStroke, vop), g.s(1.f));
+
+        float capH = g.s(22.f);
+        g.text(std::to_wstring(clampi((int)lround(vol * 100.f), 0, 100)) + L"%", g.fCaption.Get(),
+               rectOf(pop.left, pop.bottom - capH - g.s(5.f), pw, capH), alpha(a.th.textDim, vop),
+               DWRITE_TEXT_ALIGNMENT_CENTER);
+
+        D2D1_RECT_F track = rectOf((pop.left + pop.right) * .5f - g.s(7.f), pop.top + g.s(13.f),
+                                   g.s(14.f), ph - capH - g.s(26.f));
+        float outVol = vol;
+        // On the way out it is only a picture; clicks there belong to the canvas.
+        if (vslider(a, UI_V_VOLV, track, vol, outVol, vop, 4.f, a.volPopup)) {
+            a.video.setVolume(outVol);
+            a.video.setMuted(false);
+            a.cfg.volume = clampi((int)lround(outVol * 100.f), 0, 100);
+            a.cfg.muted = false;
+        }
+        if (anim) g.dc->SetTransform(D2D1::Matrix3x2F::Identity());
     }
 }
 
@@ -1082,10 +1331,7 @@ static void drawFilmstrip(App& a) {
         float want = a.index * step + gap - (rw(r) - tw) * .5f;
         a.filmScrollTarget = clampf(want, 0.f, std::max(0.f, total - rw(r)));
     }
-    if (fabsf(a.filmScroll - a.filmScrollTarget) > 0.5f) {
-        a.filmScroll += (a.filmScrollTarget - a.filmScroll) * 0.25f;
-        a.requestAnim();
-    } else a.filmScroll = a.filmScrollTarget;
+    easeTo(a, a.filmScroll, a.filmScrollTarget, 3e-8f, 0.5f);
 
     g.dc->PushAxisAlignedClip(r, D2D1_ANTIALIAS_MODE_ALIASED);
     float y = r.top + g.s(12.f);
@@ -1227,7 +1473,7 @@ static void drawGrid(App& a) {
     float maxScroll = std::max(0.f, contentH - rh(r));
     a.gridScrollTarget = clampf(a.gridScrollTarget, 0.f, maxScroll);
     if (fabsf(a.gridScroll - a.gridScrollTarget) > 0.4f) {
-        a.gridScroll += (a.gridScrollTarget - a.gridScroll) * 0.28f;
+        a.gridScroll += (a.gridScrollTarget - a.gridScroll) * easeK(a, 1e-8f);
         a.requestAnim();
     } else a.gridScroll = a.gridScrollTarget;
 
@@ -2031,6 +2277,10 @@ void uiFrame(App& a) {
     g_tip.clear();
     a.hot = 0;
     a.wantCursor = IDC_ARROW;
+    // Widgets under an open flyout must not react; the bounds come from the
+    // previous frame, which is where the menu already was.
+    g_blockOn = a.moreMenuOpen && rw(a.moreMenuBounds) > 1.f;
+    g_block = a.moreMenuBounds;
 
     // Overlay surfaces claim the pointer before the canvas gets it.
     if (!a.fullscreen && inRect(a.R.titlebar, a.in.mouse) && a.in.hasMouse &&
@@ -2054,13 +2304,12 @@ void uiFrame(App& a) {
         drawSortMenu(a);
     }
 
+    drawInfoPanel(a);
+    drawTitlebar(a);
     if (a.moreMenuOpen && a.view == View::Viewer) {
         auto entries = buildActionMenu(a, a.videoMode);
         popupMenu(a, UI_MENU_BASE, a.moreMenuAnchor, entries, a.moreMenuOpen);
     }
-
-    drawInfoPanel(a);
-    drawTitlebar(a);
     drawToast(a);
     drawSettings(a);
     drawHelp(a);
