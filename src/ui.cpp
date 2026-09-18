@@ -96,7 +96,10 @@ static std::unordered_map<int, WidgetAnim> g_wanim;
 
 static void animState(App& a, int id, bool hovered, bool held, float& hv, float& pr) {
     WidgetAnim& w = g_wanim[id];
-    easeTo(a, w.hover, hovered ? 1.f : 0.f, 1e-7f);
+    // ~120 ms. The first try took a quarter of a second, which left a trail of
+    // still-lit buttons behind the pointer and made a shaky hover on an edge
+    // look like blinking.
+    easeTo(a, w.hover, hovered ? 1.f : 0.f, 1e-11f);
     easeTo(a, w.press, held ? 1.f : 0.f, 1e-14f);
     hv = w.hover; pr = w.press;
 }
@@ -878,8 +881,13 @@ static void drawImage(App& a) {
         return;
     }
 
-    // Build the transform: image pixels -> screen pixels.
-    float srcW = (float)std::max(1, pic->srcW), srcH = (float)std::max(1, pic->srcH);
+    // Build the transform: image pixels -> screen pixels. This has to be the
+    // size the rest of the viewer measures against - with a crop applied that is
+    // the crop, not the whole file, or the cropped part gets stretched to the
+    // original's shape.
+    int effW = pic->srcW, effH = pic->srcH;
+    a.sourceSize(effW, effH);
+    float srcW = (float)std::max(1, effW), srcH = (float)std::max(1, effH);
     float cx = (cv.left + cv.right) * .5f + a.panX;
     float cy = (cv.top + cv.bottom) * .5f + a.panY;
 
@@ -951,6 +959,41 @@ static D2D1::Matrix3x2F cropToScreen(App& a, float srcW, float srcH) {
     m = m * D2D1::Matrix3x2F::Translation((cv.left + cv.right) * .5f + a.panX,
                                           (cv.top + cv.bottom) * .5f + a.panY);
     return m;
+}
+
+// A minimal typed number box. There is no general text input in the app and
+// this is the only place that needs one, so it stays deliberately small: click
+// to focus, digits and backspace, Enter or a click elsewhere to leave.
+static void numField(App& a, int uid, D2D1_RECT_F r, int field, int value) {
+    Gfx& g = a.gfx;
+    bool focused = (a.editField == field);
+    bool hovered = inRect(r, a.in.mouse) && a.in.hasMouse;
+    if (hovered) { g_overUi = true; a.hot = uid; useCursor(a, IDC_IBEAM); }
+    if (a.in.pressed) {
+        if (hovered) {
+            if (!focused) { a.editField = field; a.editBuf.clear(); }
+            focused = true;
+        } else if (focused) {
+            a.editField = 0;
+            focused = false;
+        }
+    }
+
+    float hv = 0.f, pr = 0.f;
+    animState(a, uid, hovered || focused, false, hv, pr);
+    g.roundRect(r, g.s(5.f), mix(a.th.card, a.th.cardHover, hv));
+    g.roundRectStroke(r, g.s(5.f), focused ? a.th.accent : a.th.stroke, g.s(focused ? 1.6f : 1.f));
+
+    wstring text = focused && !a.editBuf.empty() ? a.editBuf
+                 : (focused ? wstring() : std::to_wstring(value));
+    if (focused) {
+        // A caret that blinks only while the field is focused.
+        bool on = fmod(nowSec(), 1.06) < 0.55;
+        if (on) text += L"|";
+        a.requestAnim();
+    }
+    g.text(text, g.fCaption.Get(), r, focused ? a.th.text : a.th.textDim,
+           DWRITE_TEXT_ALIGNMENT_CENTER);
 }
 
 static void drawCrop(App& a) {
@@ -1060,6 +1103,7 @@ static void drawCrop(App& a) {
             if (east)  r.right = clampf(r.right + dx, r.left + minSide, srcW);
             if (north) r.top = clampf(r.top + dy, 0.f, r.bottom - minSide);
             if (south) r.bottom = clampf(r.bottom + dy, r.top + minSide, srcH);
+            cropShapeTo(r, a.cropAspect(), srcW, srcH, west, east, north, south);
         }
         if (r.left != a.cropRect.left || r.top != a.cropRect.top ||
             r.right != a.cropRect.right || r.bottom != a.cropRect.bottom) {
@@ -1072,26 +1116,76 @@ static void drawCrop(App& a) {
     if (overCanvas) g_overUi = true;      // never start a pan while cropping
 
     // ---------------- toolbar
-    float bw = g.s(96.f), bh = g.s(34.f), gap = g.s(8.f);
-    float total = bw * 2 + gap;
-    float bx = (cv.left + cv.right - total) * .5f;
-    float by = cv.bottom - bh - g.s(96.f);
-    D2D1_RECT_F pill = rectOf(bx - g.s(12.f), by - g.s(10.f), total + g.s(24.f), bh + g.s(20.f));
+    struct Preset { const wchar_t* name; int w, h; };
+    const Preset presets[] = {
+        { T(L"Вільно"), 0, 0 }, { T(L"Оригінал"), -1, -1 },
+        { L"1:1", 1, 1 }, { L"4:3", 4, 3 }, { L"3:4", 3, 4 },
+        { L"16:9", 16, 9 }, { L"9:16", 9, 16 }, { L"3:2", 3, 2 }, { L"2:3", 2, 3 },
+    };
+    const int nPresets = (int)(sizeof(presets) / sizeof(presets[0]));
+
+    float bh = g.s(30.f), gap = g.s(6.f), pad = g.s(12.f);
+    float chipW = g.s(58.f), wideChip = g.s(72.f);
+    float rowW = 0;
+    for (int i = 0; i < nPresets; ++i) rowW += (i < 2 ? wideChip : chipW) + gap;
+    rowW -= gap;
+    rowW += g.s(36.f) + gap;                     // the swap button
+
+    float fieldW = g.s(62.f), ratioW = g.s(46.f);
+    float row2W = fieldW * 2 + g.s(18.f) + g.s(26.f) + ratioW * 2 + g.s(14.f) + g.s(200.f);
+    float pillW = std::min(std::max(rowW, row2W) + pad * 2, rw(cv) - g.s(16.f));
+    float pillH = bh * 2 + g.s(10.f) + pad * 2;
+    D2D1_RECT_F pill = rectOf((cv.left + cv.right - pillW) * .5f,
+                              cv.bottom - pillH - g.s(88.f), pillW, pillH);
     shadowPill(g, pill, g.s(10.f), a.th.shadow, 1.f);
-    g.roundRect(pill, g.s(10.f), alpha(a.th.bar, 0.98f));
+    D2D1_COLOR_F face = a.th.bar;
+    face.a = 0.99f;
+    g.roundRect(pill, g.s(10.f), face);
     g.roundRectStroke(pill, g.s(10.f), a.th.barStroke, g.s(1.f));
+    if (inRect(pill, a.in.mouse) && a.in.hasMouse) g_overUi = true;
 
-    textButton(a, UI_CROP_BASE, CMD_CROP_APPLY, rectOf(bx, by, bw, bh),
-               T(L"Обрізати"), T(L"Enter"), { false, true, false, true, 5.f });
-    textButton(a, UI_CROP_BASE + 1, CMD_CROP_CANCEL, rectOf(bx + bw + gap, by, bw, bh),
+    // row 1: ratio presets, then a button that turns the ratio on its side
+    float x = pill.left + pad, y1 = pill.top + pad;
+    float avail = pillW - pad * 2 - g.s(36.f) - gap;
+    float scale = std::min(1.f, avail / std::max(1.f, rowW - g.s(36.f) - gap));
+    for (int i = 0; i < nPresets; ++i) {
+        int pw = presets[i].w, ph = presets[i].h;
+        if (pw < 0) { pw = pic->srcW; ph = pic->srcH; }
+        bool sel = (pw == 0) ? (a.cropRatioW == 0 && a.cropRatioH == 0)
+                             : (a.cropRatioW == pw && a.cropRatioH == ph);
+        float cw = (i < 2 ? wideChip : chipW) * scale;
+        if (textButton(a, UI_CROP_BASE + 20 + i, CMD_NONE, rectOf(x, y1, cw, bh),
+                       presets[i].name, nullptr, { sel, true, false, false, 5.f }) && !sel)
+            a.cropSetRatio(pw, ph);
+        x += cw + gap * scale;
+    }
+    if (button(a, UI_CROP_BASE + 40, CMD_NONE, rectOf(x, y1, g.s(36.f), bh), ico::Flip,
+               T(L"Поміняти сторони місцями"), { false, a.cropRatioW > 0 }, 1.f))
+        a.cropSetRatio(a.cropRatioH, a.cropRatioW);
+
+    // row 2: exact pixels, exact ratio, and the two actions
+    float y2 = y1 + bh + g.s(10.f);
+    float fx = pill.left + pad;
+    int curW = (int)lround(a.cropRect.right - a.cropRect.left);
+    int curH = (int)lround(a.cropRect.bottom - a.cropRect.top);
+    numField(a, UI_CROP_BASE + 50, rectOf(fx, y2, fieldW, bh), 1, curW);
+    g.text(L"×", g.fCaption.Get(), rectOf(fx + fieldW, y2, g.s(18.f), bh),
+           a.th.textDim, DWRITE_TEXT_ALIGNMENT_CENTER);
+    numField(a, UI_CROP_BASE + 51, rectOf(fx + fieldW + g.s(18.f), y2, fieldW, bh), 2, curH);
+    fx += fieldW * 2 + g.s(18.f) + g.s(14.f);
+
+    numField(a, UI_CROP_BASE + 52, rectOf(fx, y2, ratioW, bh), 3, a.cropRatioW);
+    g.text(L":", g.fCaption.Get(), rectOf(fx + ratioW, y2, g.s(12.f), bh),
+           a.th.textDim, DWRITE_TEXT_ALIGNMENT_CENTER);
+    numField(a, UI_CROP_BASE + 53, rectOf(fx + ratioW + g.s(12.f), y2, ratioW, bh), 4, a.cropRatioH);
+
+    float aw = g.s(96.f);
+    float ax2 = pill.right - pad - aw;
+    textButton(a, UI_CROP_BASE + 1, CMD_CROP_CANCEL, rectOf(ax2, y2, aw, bh),
                T(L"Скасувати"), T(L"Esc"), { false, true, false, false, 5.f });
-
-    wchar_t info[64];
-    swprintf(info, 64, L"%d × %d",
-             (int)lround(a.cropRect.right - a.cropRect.left),
-             (int)lround(a.cropRect.bottom - a.cropRect.top));
-    g.text(info, g.fCaption.Get(), rectOf(pill.left, pill.top - g.s(24.f), rw(pill), g.s(20.f)),
-           D2D1::ColorF(1, 1, 1, 0.9f), DWRITE_TEXT_ALIGNMENT_CENTER);
+    ax2 -= aw + gap;
+    textButton(a, UI_CROP_BASE, CMD_CROP_APPLY, rectOf(ax2, y2, aw, bh),
+               T(L"Обрізати"), T(L"Enter"), { false, true, false, true, 5.f });
 }
 
 // --------------------------------------------------------------- command bar
@@ -2048,7 +2142,12 @@ static void drawCompressor(App& a) {
     if (formats.empty()) { a.compOpen = false; return; }
     const EncFormat& fmt = formats[clampi(a.compFormat, 0, (int)formats.size() - 1)];
 
-    g.dc->FillRectangle(panel, g.solid(a.th.chrome));
+    // A real surface, not the bare backdrop: th.chrome is fully transparent, so
+    // the panel used to be the blurred desktop, and every hover highlight was
+    // composited over whatever moved behind the window.
+    D2D1_COLOR_F face = a.th.bar;
+    face.a = 0.99f;
+    g.dc->FillRectangle(panel, g.solid(face));
     g.dc->FillRectangle(rectOf(panel.left, panel.top, g.s(1.f), rh(panel)), g.solid(a.th.stroke));
     if (inRect(panel, a.in.mouse) && a.in.hasMouse) g_overUi = true;
 

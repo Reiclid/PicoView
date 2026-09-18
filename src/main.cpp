@@ -741,6 +741,90 @@ void App::openFolderDialog() {
 }
 
 // ------------------------------------------------------------------- crop
+// Largest rectangle with this ratio that still fits, anchored as the drag says.
+void cropShapeTo(D2D1_RECT_F& r, float ar, float srcW, float srcH,
+                        int west, int east, int north, int south) {
+    if (ar <= 0.f) return;
+    float ax = east ? r.left : (west ? r.right : (r.left + r.right) * .5f);
+    float ay = south ? r.top : (north ? r.bottom : (r.top + r.bottom) * .5f);
+
+    float roomW = east ? (srcW - ax) : (west ? ax : 2.f * std::min(ax, srcW - ax));
+    float roomH = south ? (srcH - ay) : (north ? ay : 2.f * std::min(ay, srcH - ay));
+
+    float w = r.right - r.left, h = r.bottom - r.top;
+    // Whichever edge is being dragged drives; the other follows the ratio.
+    if (west || east) h = w / ar; else w = h * ar;
+    w = std::min(w, std::min(roomW, roomH * ar));
+    h = w / ar;
+    if (w < 8.f || h < 8.f) { w = std::max(8.f, w); h = std::max(8.f, w / ar); }
+
+    if (east)       { r.left = ax; r.right = ax + w; }
+    else if (west)  { r.right = ax; r.left = ax - w; }
+    else            { r.left = ax - w * .5f; r.right = ax + w * .5f; }
+    if (south)      { r.top = ay; r.bottom = ay + h; }
+    else if (north) { r.bottom = ay; r.top = ay - h; }
+    else            { r.top = ay - h * .5f; r.bottom = ay + h * .5f; }
+
+    // Nudge back inside rather than clipping, so the shape is preserved.
+    if (r.left < 0)     { r.right -= r.left; r.left = 0; }
+    if (r.top < 0)      { r.bottom -= r.top; r.top = 0; }
+    if (r.right > srcW) { r.left -= r.right - srcW; r.right = srcW; }
+    if (r.bottom > srcH){ r.top -= r.bottom - srcH; r.bottom = srcH; }
+}
+
+void App::cropSetSize(int w, int h) {
+    auto pic = current();
+    if (!pic || pic->srcW <= 0) return;
+    float sw = (float)pic->srcW, sh = (float)pic->srcH;
+    float nw = clampf((float)w, 8.f, sw), nh = clampf((float)h, 8.f, sh);
+    cropRect.right = cropRect.left + nw;
+    cropRect.bottom = cropRect.top + nh;
+    if (cropRect.right > sw)  { cropRect.left -= cropRect.right - sw;  cropRect.right = sw; }
+    if (cropRect.bottom > sh) { cropRect.top -= cropRect.bottom - sh; cropRect.bottom = sh; }
+    cropRect.left = std::max(0.f, cropRect.left);
+    cropRect.top = std::max(0.f, cropRect.top);
+    invalidate();
+}
+
+void App::cropFitRatio() {
+    auto pic = current();
+    if (!pic || pic->srcW <= 0) return;
+    float ar = cropAspect();
+    if (ar <= 0.f) return;
+    cropShapeTo(cropRect, ar, (float)pic->srcW, (float)pic->srcH, 0, 0, 0, 0);
+    invalidate();
+}
+
+void App::cropSetRatio(int rw, int rh) {
+    cropRatioW = std::max(0, rw);
+    cropRatioH = std::max(0, rh);
+    cropFitRatio();
+    invalidate();
+}
+
+void App::editCommit() {
+    if (!editField) return;
+    int v = 0;
+    for (wchar_t c : editBuf) if (c >= L'0' && c <= L'9') v = v * 10 + (c - L'0');
+    int w = (int)lround(cropRect.right - cropRect.left);
+    int h = (int)lround(cropRect.bottom - cropRect.top);
+    switch (editField) {
+        case 1:
+            if (v >= 8) {
+                cropSetSize(v, cropAspect() > 0.f ? (int)lround(v / cropAspect()) : h);
+            }
+            break;
+        case 2:
+            if (v >= 8) {
+                cropSetSize(cropAspect() > 0.f ? (int)lround(v * cropAspect()) : w, v);
+            }
+            break;
+        case 3: cropSetRatio(v, cropRatioH > 0 ? cropRatioH : 1); break;
+        case 4: cropSetRatio(cropRatioW > 0 ? cropRatioW : 1, v); break;
+    }
+    invalidate();
+}
+
 bool App::cropSize(int& w, int& h) const {
     if (!cropActive) return false;
     w = std::max(1, (int)lround(cropRect.right - cropRect.left));
@@ -760,6 +844,7 @@ void App::cropBegin() {
     }
     cropMode = true;
     cropDrag = -1;
+    editField = 0;
     settingsOpen = moreMenuOpen = showHelp = false;
     applyFit(true);
     invalidate();
@@ -1572,6 +1657,16 @@ static void onKey(App& a, WPARAM key) {
     bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     a.lastMouseMove = nowSec();
 
+    // A focused number field swallows everything except leaving it, or the
+    // digits would double as viewer shortcuts.
+    if (a.editField) {
+        if (key == VK_ESCAPE || key == VK_RETURN || key == VK_TAB) {
+            a.editField = 0;
+            a.invalidate();
+        }
+        return;
+    }
+
     if (ctrl) {
         switch (key) {
             case 'C': uiOnCommand(a, CMD_COPY); return;
@@ -1836,6 +1931,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         case WM_PG_COMPRESS: pumpCompressor(a); return 0;
+
+        case WM_CHAR:
+            if (a.editField) {
+                wchar_t c = (wchar_t)wp;
+                if (c >= L'0' && c <= L'9') { if (a.editBuf.size() < 5) a.editBuf += c; }
+                else if (c == 8) { if (!a.editBuf.empty()) a.editBuf.pop_back(); }
+                a.editCommit();
+                a.invalidate();
+                return 0;
+            }
+            break;
 
         case WM_KEYDOWN: onKey(a, wp); return 0;
         case WM_SYSKEYDOWN:

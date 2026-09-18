@@ -62,6 +62,11 @@ struct Toast {
     double  until = 0;
 };
 
+// Reshapes a crop rectangle to a fixed ratio, keeping whichever edge the drag
+// is not moving. Defined in main.cpp, used by the drag handler in ui.cpp.
+void cropShapeTo(D2D1_RECT_F& r, float ar, float srcW, float srcH,
+                 int west, int east, int north, int south);
+
 struct App {
     HWND      hwnd = nullptr;
     HINSTANCE inst = nullptr;
@@ -180,7 +185,15 @@ struct App {
     int    cropDrag = -1;           // -1 none, 0..7 handles, 8 whole rectangle
     D2D1_POINT_2F cropGrabAt{};
     D2D1_RECT_F   cropGrabRect{};
-    int    cropAspect = 0;          // 0 free, else index into the preset list
+    // The locked ratio, as the two numbers the user sees. 0:0 means free.
+    int    cropRatioW = 0, cropRatioH = 0;
+    float  cropAspect() const {
+        return (cropRatioW > 0 && cropRatioH > 0) ? (float)cropRatioW / cropRatioH : 0.f;
+    }
+
+    // A tiny typed field: which one has focus, and the digits so far.
+    int     editField = 0;          // 0 none, 1 width, 2 height, 3 ratio w, 4 ratio h
+    wstring editBuf;
 
     // ---- compressor / converter
     Compressor   comp;
@@ -253,6 +266,10 @@ struct App {
     void rememberView();               // stash the current zoom/orientation
     void takePendingView();            // apply a stashed one after the fit
     void cropBegin();
+    void cropSetSize(int w, int h);          // exact pixels, kept inside the image
+    void cropSetRatio(int rw, int rh);       // 0:0 unlocks
+    void cropFitRatio();                     // reshape the rectangle to the ratio
+    void editCommit();                       // push the typed digits into the crop
     void cropApply();
     void cropCancel();
     void cropReset();
