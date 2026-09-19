@@ -509,6 +509,15 @@ void runDecodeJob(const DecodeJob& job, DecodeResult& out, const std::atomic<uin
         // The Explorer cache already knows nearly every format through shell
         // extensions, and it answers in microseconds when warm.
         if (shellThumb(job.path, want, false, out.img, out.hasAlpha)) out.ok = true;
+        // A song with no picture in it gets one of its own rather than a grey
+        // placeholder. Drawn here, on the worker, so the grid pays nothing.
+        if (!out.ok && isAudioPath(job.path)) {
+            coverRaster(job.path, clampi(want, 96, 512), out.img);
+            out.srcW = out.img.w;
+            out.srcH = out.img.h;
+            out.generated = true;
+            out.ok = out.img.valid();
+        }
         if (!out.ok) {
             std::vector<uint8_t> data;
             uint64_t sz = 0; FILETIME mt{};

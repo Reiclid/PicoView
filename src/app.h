@@ -28,6 +28,7 @@ struct Thumb {
     int    w = 0, h = 0;
     bool   requested = false;
     bool   failed = false;
+    bool   generated = false;       // artwork we made up for a track with none
     double arrivedAt = 0;
 };
 
@@ -60,6 +61,16 @@ struct ViewState {
 struct Toast {
     wstring text;
     double  until = 0;
+};
+
+// The Direct2D side of the generated artwork: one brush per lobe of the plan
+// that coverart.cpp worked out, plus the vignette.
+struct CoverArt {
+    wstring   path;
+    void*     device = nullptr;    // whose device context the brushes belong to
+    CoverPlan plan;
+    std::vector<ComPtr<ID2D1RadialGradientBrush>> brushes;
+    ComPtr<ID2D1RadialGradientBrush> vignette;
 };
 
 // Reshapes a crop rectangle to a fixed ratio, keeping whichever edge the drag
@@ -238,6 +249,12 @@ struct App {
     bool     convCanCopy = false;
     int      convSrcChannels = 0, convSrcRate = 0, convSrcKbps = 0;
     uint64_t convSrcBytes = 0;
+
+    AudioEnvelope envelope;          // loudness of the track over time
+    CoverArt  cover;                 // generated artwork for a track with none
+    float     coverPulse = 0;        // smoothed low end: fast attack, slow release
+    float     coverLevel = 0;
+    double    coverTime = 0;         // advances only while the track plays
 
     wstring   audioTagsPath;         // whose tags audioTags holds
     AudioTags audioTags;

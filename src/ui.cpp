@@ -775,6 +775,105 @@ static void drawEmptyState(App& a, D2D1_RECT_F r) {
 
 static void drawVideoFrame(App& a, D2D1_RECT_F cv);
 
+// --------------------------------------------------------------- cover art
+// The plan comes from coverart.cpp, which the thumbnail pipeline also uses; all
+// that happens here is turning it into Direct2D brushes and letting the music
+// move them. Anything that decides how it looks belongs over there, so the
+// sleeve and the thumbnail cannot drift apart.
+static void buildCover(App& a, const wstring& path) {
+    Gfx& g = a.gfx;
+    a.cover = CoverArt();
+    a.cover.path = path;
+    a.cover.device = g.dc.Get();
+    if (!g.dc) return;
+
+    coverPlan(path, a.cover.plan);
+    for (const auto& b : a.cover.plan.lobes) {
+        D2D1_COLOR_F c = D2D1::ColorF(b.cr, b.cg, b.cb);
+        D2D1_GRADIENT_STOP bs[5] = {
+            { 0.f,   D2D1::ColorF(c.r, c.g, c.b, b.alpha * coverFalloff(0.f)) },
+            { 0.20f, D2D1::ColorF(c.r, c.g, c.b, b.alpha * coverFalloff(0.20f)) },
+            { 0.46f, D2D1::ColorF(c.r, c.g, c.b, b.alpha * coverFalloff(0.46f)) },
+            { 0.74f, D2D1::ColorF(c.r, c.g, c.b, b.alpha * coverFalloff(0.74f)) },
+            { 1.f,   D2D1::ColorF(c.r, c.g, c.b, 0.f) },
+        };
+        ComPtr<ID2D1GradientStopCollection> sc;
+        ComPtr<ID2D1RadialGradientBrush> br;
+        if (SUCCEEDED(g.dc->CreateGradientStopCollection(bs, 5, &sc)))
+            g.dc->CreateRadialGradientBrush(
+                D2D1::RadialGradientBrushProperties(D2D1::Point2F(0.f, 0.f),
+                                                    D2D1::Point2F(0.f, 0.f), 1.f, 1.f),
+                sc.Get(), &br);
+        a.cover.brushes.push_back(br);
+    }
+
+    // The corners stay black, so the light looks like it is coming from inside
+    // the square rather than painted onto it.
+    D2D1_GRADIENT_STOP vg[3] = {
+        { 0.f,   D2D1::ColorF(0, 0, 0, 0.f) },
+        { 0.72f, D2D1::ColorF(0, 0, 0, 0.f) },
+        { 1.f,   D2D1::ColorF(0, 0, 0, 0.92f) },
+    };
+    ComPtr<ID2D1GradientStopCollection> vs;
+    if (SUCCEEDED(g.dc->CreateGradientStopCollection(vg, 3, &vs)))
+        g.dc->CreateRadialGradientBrush(
+            D2D1::RadialGradientBrushProperties(D2D1::Point2F(0.f, 0.f),
+                                                D2D1::Point2F(0.f, 0.f), 1.f, 1.f),
+            vs.Get(), &a.cover.vignette);
+}
+
+// `pulse` is the low end, `level` the overall loudness, both 0..1; `t` only
+// advances while the track is playing, so a paused sleeve holds still.
+static void drawCoverArt(App& a, D2D1_RECT_F art, float rad, float level, float pulse, double t) {
+    Gfx& g = a.gfx;
+    float side = rw(art);
+    if (side <= 1.f) return;
+
+    g.pushRoundClip(art, rad);
+    g.dc->FillRectangle(art, g.solid(D2D1::ColorF(0.015f, 0.015f, 0.02f, 1.f)));
+
+    D2D1_POINT_2F mid{ (art.left + art.right) * .5f, (art.top + art.bottom) * .5f };
+
+    // Adding the lobes instead of laying them over each other is what makes
+    // red over green come out yellow, and the middle come out white-hot.
+    g.dc->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_ADD);
+    for (size_t i = 0; i < a.cover.plan.lobes.size() && i < a.cover.brushes.size(); ++i) {
+        const CoverLobe& b = a.cover.plan.lobes[i];
+        ID2D1RadialGradientBrush* br = a.cover.brushes[i].Get();
+        if (!br) continue;
+
+        // Each lobe swings slowly around the centre; the beat pushes it out
+        // and swells it at the same time.
+        float ph = b.phase + (float)t * b.speed * a.cover.plan.rot * 3.f;
+        float orbX = (b.x - .5f) * (1.f + 0.45f * pulse * b.weight);
+        float orbY = (b.y - .5f) * (1.f + 0.45f * pulse * b.weight);
+        float cs = cosf(ph * 0.35f), sn = sinf(ph * 0.35f);
+        float cx = mid.x + (orbX * cs - orbY * sn + b.dx * sinf(ph)) * side;
+        float cy = mid.y + (orbX * sn + orbY * cs + b.dy * cosf(ph * 0.83f)) * side;
+
+        float rr = b.r * side * (1.f + 0.34f * pulse * b.weight + 0.05f * sinf(ph * 1.7f));
+        // The petal is an ellipse leaning outwards; the brush transform turns
+        // it in place, around the centre it was just given.
+        float lean = (b.lean + ph * 0.35f) * 57.2958f;
+        br->SetCenter(D2D1::Point2F(cx, cy));
+        br->SetRadiusX(rr * b.aspect);
+        br->SetRadiusY(rr);
+        br->SetTransform(D2D1::Matrix3x2F::Rotation(lean, D2D1::Point2F(cx, cy)));
+        br->SetOpacity(clampf(0.48f + 0.34f * level + 0.30f * pulse * b.weight, 0.f, 1.f));
+        g.dc->FillRectangle(art, br);
+    }
+    g.dc->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+
+    if (a.cover.vignette) {
+        float vr = side * 0.78f;
+        a.cover.vignette->SetCenter(mid);
+        a.cover.vignette->SetRadiusX(vr);
+        a.cover.vignette->SetRadiusY(vr);
+        g.dc->FillRectangle(art, a.cover.vignette.Get());
+    }
+    g.popRoundClip();
+}
+
 // Music has no picture, so the canvas becomes a record sleeve: whatever art the
 // file carries, the tags underneath, and the player bar doing everything else.
 static void drawAudioStage(App& a, D2D1_RECT_F cv) {
@@ -804,25 +903,51 @@ static void drawAudioStage(App& a, D2D1_RECT_F cv) {
         tb = a.thumbFor(path, 512, true);
     }
 
+    // No artwork in the file: give the track one of its own, and let it move
+    // with the music. The analysis only starts once we know there is nothing
+    // to show - a file with a cover never pays for it.
+    bool madeUp = tb && tb->generated;            // the thumbnail is our own art
+    bool haveArt = tb && tb->bmp && !madeUp;
+    float artFade = haveArt ? clampf((float)((nowSec() - tb->arrivedAt) * 5.0), 0.f, 1.f) : 0.f;
+    bool noArt = madeUp || (tb && tb->failed);
+    if (noArt && a.envelope.path() != path) a.envelope.open(path);
+
+    float level = 0.f, bass = 0.f;
+    bool playing = a.video.playing();
+    if (!a.envelope.at(a.video.position(), level, bass)) {
+        // Nothing measured yet: breathe gently rather than stand still.
+        double tt = nowSec();
+        bass = 0.30f + 0.16f * sinf((float)tt * 1.5f);
+        level = 0.55f;
+    }
+    if (!playing) { bass *= 0.25f; level *= 0.6f; }
+   // A kick should snap and then fall away, not fade in.
+    a.coverPulse += (bass - a.coverPulse) * easeK(a, bass > a.coverPulse ? 1e-30f : 0.03f);
+    a.coverLevel += (level - a.coverLevel) * easeK(a, 0.05f);
+    if (playing) a.coverTime += a.frameDt;
+
     shadowPill(g, art, rad, a.th.shadow, 0.85f);
-    if (tb && tb->bmp) {
+    if (artFade < 1.f) {
+        if (a.cover.path != path || a.cover.device != g.dc.Get()) buildCover(a, path);
+        // The whole square swells a little on the beat.
+        float grow = 1.f + 0.014f * a.coverPulse;
+        float pad = side * (grow - 1.f) * .5f;
+        D2D1_RECT_F big = rectOf(art.left - pad, art.top - pad, side * grow, side * grow);
+        drawCoverArt(a, big, rad * grow, a.coverLevel, a.coverPulse, a.coverTime);
+        if (playing || fabsf(a.coverPulse - bass) > 0.01f) a.requestAnim();
+    }
+    if (haveArt) {
         float bw = (float)tb->w, bh = (float)tb->h;
         float k = std::max(side / bw, side / bh);          // fill the square
         float dw = bw * k, dh = bh * k;
         g.pushRoundClip(art, rad);
         g.dc->DrawBitmap(tb->bmp.Get(),
                          rectOf((art.left + art.right - dw) * .5f, (art.top + art.bottom - dh) * .5f, dw, dh),
-                         1.f, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+                         artFade, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
         g.popRoundClip();
-    } else {
-        g.roundRect(art, rad, mix(a.th.card, a.th.accent, 0.16f));
-        float k = std::max(1.f, side / g.s(78.f));
-        D2D1_POINT_2F c{ (art.left + art.right) * .5f, (art.top + art.bottom) * .5f };
-        g.dc->SetTransform(D2D1::Matrix3x2F::Scale(k, k, c));
-        g.text(ico::Music, g.fIconBig.Get(), rectOf(c.x - g.s(30.f), c.y - g.s(30.f), g.s(60.f), g.s(60.f)),
-               alpha(a.th.text, 0.45f), DWRITE_TEXT_ALIGNMENT_CENTER);
-        g.dc->SetTransform(D2D1::Matrix3x2F::Identity());
-        if (tb && !tb->failed && !tb->bmp) a.requestAnim();
+        if (artFade < 1.f) a.requestAnim();
+    } else if (!noArt) {
+        a.requestAnim();                     // the thumbnail is still on its way
     }
     g.roundRectStroke(art, rad, alpha(a.th.text, 0.10f), g.s(1.f));
 
@@ -1753,8 +1878,8 @@ static void drawFilmstrip(App& a) {
             if (fade < 1.f) a.requestAnim();
             g.dc->DrawBitmap(tb->bmp.Get(), dst, fade * op, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
         } else if (tb && tb->failed) {
-            g.text(isAudioPath(p) ? ico::Music : ico::Photo, g.fIcon.Get(), cell,
-                   alpha(a.th.textMute, op), DWRITE_TEXT_ALIGNMENT_CENTER);
+            g.text(ico::Photo, g.fIcon.Get(), cell, alpha(a.th.textMute, op),
+                   DWRITE_TEXT_ALIGNMENT_CENTER);
         }
 
         if (isMediaPath(p)) {
@@ -1905,8 +2030,7 @@ static void drawGrid(App& a) {
                 if (fade < 1.f) a.requestAnim();
                 g.dc->DrawBitmap(tb->bmp.Get(), dst, fade, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
             } else if (tb && tb->failed) {
-                g.text(isAudioPath(p) ? ico::Music : ico::Photo, g.fIconBig.Get(), imgR,
-                       a.th.textMute, DWRITE_TEXT_ALIGNMENT_CENTER);
+                g.text(ico::Photo, g.fIconBig.Get(), imgR, a.th.textMute, DWRITE_TEXT_ALIGNMENT_CENTER);
             } else {
                 drawSpinner(g, D2D1::Point2F((imgR.left + imgR.right) / 2, (imgR.top + imgR.bottom) / 2),
                             g.s(9.f), a.th.textMute, nowSec());

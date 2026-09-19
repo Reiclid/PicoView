@@ -425,6 +425,7 @@ void App::videoSeekBy(double delta) {
 void App::leaveVideo() {
     if (!videoMode) return;
     storeResume();
+    envelope.close();
     preview.close();
     previewBmp.Reset();
     previewW = previewH = 0;
@@ -1775,6 +1776,7 @@ static void drainResults(App& a) {
                 it->second->bmp = a.gfx.upload(r.img);
                 it->second->w = r.img.w;
                 it->second->h = r.img.h;
+                it->second->generated = r.generated;
                 it->second->arrivedAt = nowSec();
             } else it->second->failed = true;
             changed = true;

@@ -146,8 +146,37 @@ struct DecodeResult {
     uint64_t  fileSize = 0;
     FILETIME  mtime{};
     int       frameCount = 1;
+    bool      generated = false;    // artwork we made up, not read from the file
     double    decodeMs = 0;
 };
+
+// ---------------------------------------------------------------- cover art
+// What a track with no artwork of its own looks like: a hot core with petals
+// of neighbouring hues leaning out of it, added together over black. Derived
+// from the file name, so a song always comes back the same.
+struct CoverLobe {
+    float x = .5f, y = .5f;        // centre, as a fraction of the square
+    float r = .4f;                 // radius, likewise
+    float dx = 0, dy = 0;          // how far it drifts
+    float speed = 1.f, phase = 0;
+    float weight = 1.f;            // how much of the beat it takes
+    float aspect = 1.f;            // >1 stretches the lobe into a petal
+    float lean = 0;                // which way the petal points, radians
+    float alpha = 1.f;
+    float cr = 1, cg = 1, cb = 1;
+};
+
+struct CoverPlan {
+    std::vector<CoverLobe> lobes;
+    float rot = 0;                 // how fast the whole cluster turns
+    float spread = .18f;           // how far the lobes sit from the centre
+};
+
+void  coverPlan(const wstring& path, CoverPlan& out);
+void  coverHsl(float h, float sat, float l, float& r, float& g, float& b);
+float coverFalloff(float t);                  // 1 at the middle, 0 at the rim
+// The resting pose, rasterised for the thumbnail cache. Opaque BGRA, square.
+void  coverRaster(const wstring& path, int size, PixelBuf& out);
 
 // ---------------------------------------------------------------- decoding
 void     decodeInit();
@@ -401,6 +430,24 @@ public:
     double rate() const;
 
     ID2D1Bitmap1* frame(ID2D1DeviceContext* dc);
+
+private:
+    struct Impl;
+    Impl* p_ = nullptr;
+};
+
+// How loud a track is over time, decoded once on a background thread, so
+// something on screen can move with the music. Two numbers every 1/30 s.
+class AudioEnvelope {
+public:
+    ~AudioEnvelope();
+    void    open(const wstring& path);
+    void    close();
+    wstring path() const;
+    bool    done() const;                 // the whole file has been read
+    // Level and low end at that moment, each 0..1 against the loudest point
+    // so far. False when the worker has not got that far yet.
+    bool    at(double seconds, float& level, float& bass) const;
 
 private:
     struct Impl;

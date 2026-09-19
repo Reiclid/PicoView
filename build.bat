@@ -49,7 +49,7 @@ set LIBS=user32.lib gdi32.lib shell32.lib shlwapi.lib ole32.lib oleaut32.lib uui
 
 cl %CFLAGS% /Fo:build\ /Fd:build\ src\main.cpp src\ui.cpp src\gfx.cpp src\decode.cpp ^
    src\loader.cpp src\util.cpp src\video.cpp src\lang.cpp src\encode.cpp ^
-   src\convert.cpp ^
+   src\convert.cpp src\envelope.cpp src\coverart.cpp ^
    build\app.res /Fe:PicoView.exe %LFLAGS% %LIBS% || exit /b 1
 
 echo.
