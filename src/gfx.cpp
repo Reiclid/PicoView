@@ -296,6 +296,69 @@ D2D1_SIZE_F Gfx::textWrap(const wstring& str, IDWriteTextFormat* f, D2D1_RECT_F 
     return out;
 }
 
+// Every glyph is normalised to the same ink size, measured from the font
+// itself rather than a table of guesses: the same code then behaves on a
+// machine whose Segoe Fluent Icons is a different build.
+float Gfx::iconScale(wchar_t ch) {
+    auto it = iconScale_.find(ch);
+    if (it != iconScale_.end()) return it->second;
+
+    if (!iconFaceTried_) {
+        iconFaceTried_ = true;
+        ComPtr<IDWriteFontCollection> coll;
+        if (dw && SUCCEEDED(dw->GetSystemFontCollection(&coll, FALSE)) && coll) {
+            UINT32 idx = 0;
+            BOOL exists = FALSE;
+            if (SUCCEEDED(coll->FindFamilyName(L"Segoe Fluent Icons", &idx, &exists)) && exists) {
+                ComPtr<IDWriteFontFamily> fam;
+                ComPtr<IDWriteFont> font;
+                if (SUCCEEDED(coll->GetFontFamily(idx, &fam)) &&
+                    SUCCEEDED(fam->GetFirstMatchingFont(DWRITE_FONT_WEIGHT_NORMAL,
+                                                        DWRITE_FONT_STRETCH_NORMAL,
+                                                        DWRITE_FONT_STYLE_NORMAL, &font)))
+                    font->CreateFontFace(&iconFace_);
+            }
+        }
+    }
+
+    float scale = 1.f;
+    if (iconFace_) {
+        UINT32 cp = (UINT32)ch;
+        UINT16 gi = 0;
+        DWRITE_GLYPH_METRICS gm{};
+        DWRITE_FONT_METRICS fm{};
+        iconFace_->GetMetrics(&fm);
+        if (SUCCEEDED(iconFace_->GetGlyphIndices(&cp, 1, &gi)) && gi &&
+            SUCCEEDED(iconFace_->GetDesignGlyphMetrics(&gi, 1, &gm)) && fm.designUnitsPerEm) {
+            float em = (float)fm.designUnitsPerEm;
+            float w = (float)(gm.advanceWidth - gm.leftSideBearing - gm.rightSideBearing) / em;
+            float h = (float)((INT32)gm.advanceHeight - gm.topSideBearing - gm.bottomSideBearing) / em;
+            float ink = std::max(w, h);
+            // 0.88 em is what most of the set already draws at, so the common
+            // icons do not move and only the outliers are pulled into line.
+            if (ink > 0.05f) scale = clampf(0.88f / ink, 0.78f, 1.32f);
+        }
+    }
+    iconScale_[ch] = scale;
+    return scale;
+}
+
+void Gfx::icon(const wchar_t* glyph, IDWriteTextFormat* f, D2D1_RECT_F r,
+               const D2D1_COLOR_F& c, float extra) {
+    if (!glyph || !*glyph) return;
+    float k = iconScale(glyph[0]) * extra;
+    if (fabsf(k - 1.f) < 0.01f) {
+        text(glyph, f, r, c, DWRITE_TEXT_ALIGNMENT_CENTER);
+        return;
+    }
+    D2D1_POINT_2F mid{ (r.left + r.right) * .5f, (r.top + r.bottom) * .5f };
+    D2D1_MATRIX_3X2_F save;
+    dc->GetTransform(&save);
+    dc->SetTransform(D2D1::Matrix3x2F::Scale(k, k, mid) * save);
+    text(glyph, f, r, c, DWRITE_TEXT_ALIGNMENT_CENTER);
+    dc->SetTransform(save);
+}
+
 void Gfx::roundRect(D2D1_RECT_F r, float radius, const D2D1_COLOR_F& fill) {
     if (fill.a <= 0.001f) return;
     if (radius <= 0.5f) { dc->FillRectangle(r, solid(fill)); return; }

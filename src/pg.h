@@ -569,6 +569,19 @@ struct Gfx {
     void pushRoundClip(D2D1_RECT_F r, float radius);
     void popRoundClip();
     void roundRectStroke(D2D1_RECT_F r, float radius, const D2D1_COLOR_F& c, float w);
+
+    // The icon font draws some glyphs right out to the em box and others well
+    // inside it - the window controls are half again the size of the speaker
+    // at the same point size. Asking the font for each glyph's ink box and
+    // scaling to a common size is what makes a row of icons look like one set.
+    float iconScale(wchar_t ch);
+    void  icon(const wchar_t* glyph, IDWriteTextFormat* f, D2D1_RECT_F r,
+               const D2D1_COLOR_F& c, float extra = 1.f);
+
+private:
+    ComPtr<IDWriteFontFace>            iconFace_;
+    bool                               iconFaceTried_ = false;
+    std::unordered_map<wchar_t, float> iconScale_;
 };
 
 // ---------------------------------------------------------------- settings

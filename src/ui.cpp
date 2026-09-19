@@ -237,7 +237,7 @@ static bool button(App& a, int uid, int cmd, D2D1_RECT_F r, const wchar_t* glyph
     if (glyph && *glyph) {
         bool xf = (xform != GX_NONE) || pr > 0.002f;
         if (xf) g.dc->SetTransform(glyphXform(xform, pr, r));
-        g.text(glyph, g.fIcon.Get(), r, alpha(fg, opacity), DWRITE_TEXT_ALIGNMENT_CENTER);
+        g.icon(glyph, g.fIcon.Get(), r, alpha(fg, opacity));
         if (xf) g.dc->SetTransform(D2D1::Matrix3x2F::Identity());
     }
 
@@ -432,7 +432,8 @@ static void popupMenu(App& a, int uidBase, D2D1_RECT_F anchor,
             IDWriteTextFormat* gf = (it.glyph[0] >= 0xE000) ? g.fIcon.Get() : g.fBody.Get();
             D2D1_RECT_F gr = rectOf(ir.left + g.s(8.f), ir.top, g.s(26.f), ih);
             if (it.xform != GX_NONE) g.dc->SetTransform(glyphXform(it.xform, 0.f, gr));
-            g.text(it.glyph, gf, gr, it.toggled ? a.th.accent : fg, DWRITE_TEXT_ALIGNMENT_CENTER);
+            if (gf == g.fIcon.Get()) g.icon(it.glyph, gf, gr, it.toggled ? a.th.accent : fg);
+            else g.text(it.glyph, gf, gr, it.toggled ? a.th.accent : fg, DWRITE_TEXT_ALIGNMENT_CENTER);
             if (it.xform != GX_NONE) g.dc->SetTransform(D2D1::Matrix3x2F::Identity());
         }
         g.text(it.label, g.fBody.Get(), rectOf(ir.left + g.s(42.f), ir.top, rw(ir) - g.s(50.f), ih), fg);
@@ -1065,9 +1066,9 @@ static void drawVideoFrame(App& a, D2D1_RECT_F cv) {
         D2D1_POINT_2F c{ (cv.left + cv.right) * .5f, (cv.top + cv.bottom) * .5f };
         g.dc->FillEllipse(D2D1::Ellipse(c, rad, rad), g.solid(D2D1::ColorF(0, 0, 0, 0.42f)));
         g.dc->FillEllipse(D2D1::Ellipse(c, rad, rad), g.solid(alpha(a.th.text, 0.10f)));
-        g.text(a.video.ended() ? L"" : ico::Play, g.fIconBig.Get(),
+        g.icon(a.video.ended() ? L"" : ico::Play, g.fIconBig.Get(),
                rectOf(c.x - rad, c.y - rad, rad * 2, rad * 2),
-               D2D1::ColorF(1, 1, 1, 0.92f), DWRITE_TEXT_ALIGNMENT_CENTER);
+               D2D1::ColorF(1, 1, 1, 0.92f));
     }
 }
 
@@ -1585,7 +1586,31 @@ static void drawVideoBar(App& a) {
     D2D1_RECT_F seekHot = { seek.left - g.s(4.f), seek.top - g.s(10.f),
                             seek.right + g.s(4.f), seek.bottom + g.s(10.f) };
     bool overSeek = a.in.hasMouse && (inRect(seekHot, a.in.mouse) || dragging);
-    if (live && dur > 0 && overSeek && op > 0.4f) {
+    if (live && dur > 0 && overSeek && op > 0.4f && !a.video.hasVideo()) {
+        // Music has no frame to show, so the card was an empty box with a
+        // spinner in it. The time is the only thing worth putting there.
+        double tHover = clampf((a.in.mouse.x - seek.left) / std::max(1.f, rw(seek)), 0.f, 1.f) * dur;
+        wstring label = formatTime(tHover);
+        float pw = g.measure(label, g.fCaption.Get()).width + g.s(22.f);
+        float ph = g.s(26.f);
+        float wantX = clampf(a.in.mouse.x - pw * .5f,
+                             a.R.canvas.left + g.s(8.f),
+                             std::max(a.R.canvas.left + g.s(8.f), a.R.canvas.right - pw - g.s(8.f)));
+        if (a.previewX < 0.f) a.previewX = wantX;
+        easeTo(a, a.previewX, wantX, 1e-12f, 0.3f);
+        easeTo(a, a.previewFade, 1.f, 1e-9f, 0.003f);
+        float cop = op * a.previewFade;
+
+        D2D1_RECT_F pill = rectOf(a.previewX, bar.top - ph - g.s(10.f), pw, ph);
+        shadowPill(g, pill, ph * .5f, a.th.shadow, cop);
+        g.roundRect(pill, ph * .5f, alpha(a.th.bar, cop));
+        g.roundRectStroke(pill, ph * .5f, alpha(a.th.barStroke, cop), g.s(1.f));
+        g.text(label, g.fCaption.Get(), pill, alpha(a.th.text, cop), DWRITE_TEXT_ALIGNMENT_CENTER);
+
+        float markX = clampf(a.in.mouse.x, seek.left, seek.right);
+        g.roundRect(rectOf(markX - g.s(1.f), seek.top + g.s(1.f), g.s(2.f), rh(seek) - g.s(2.f)),
+                    g.s(1.f), alpha(a.th.text, cop * 0.75f));
+    } else if (live && dur > 0 && overSeek && op > 0.4f) {
         wstring path = a.currentPath();
         if (a.preview.path() != path) {
             a.preview.open(path, 320);
@@ -1897,8 +1922,8 @@ static void drawFilmstrip(App& a) {
             float bw = g.s(20.f), bh = g.s(14.f);
             D2D1_RECT_F badge = rectOf(cell.left + g.s(5.f), cell.bottom - bh - g.s(5.f), bw, bh);
             g.roundRect(badge, g.s(3.f), D2D1::ColorF(0, 0, 0, 0.60f * op));
-            g.text(isAudioPath(p) ? ico::Music : ico::Play, g.fIconSmall.Get(), badge,
-                   D2D1::ColorF(1, 1, 1, 0.92f * op), DWRITE_TEXT_ALIGNMENT_CENTER);
+            g.icon(isAudioPath(p) ? ico::Music : ico::Play, g.fIconSmall.Get(), badge,
+                   D2D1::ColorF(1, 1, 1, 0.92f * op));
         }
 
         if (cur) g.roundRectStroke(cell, g.s(4.f), alpha(a.th.accent, op), g.s(2.f));
@@ -1920,7 +1945,7 @@ static void drawGridHeader(App& a) {
     float pad = g.s(16.f);
     float cy = (r.top + r.bottom) * .5f;
     wstring dir = a.folder.dir().empty() ? T(L"Папку не вибрано") : a.folder.dir();
-    g.text(ico::Folder, g.fIcon.Get(), rectOf(r.left + pad, r.top, g.s(20.f), rh(r)), a.th.textDim, DWRITE_TEXT_ALIGNMENT_CENTER);
+    g.icon(ico::Folder, g.fIcon.Get(), rectOf(r.left + pad, r.top, g.s(20.f), rh(r)), a.th.textDim);
 
     float tx = r.left + pad + g.s(26.f);
     float availW = rw(r) - g.s(300.f);
@@ -1941,7 +1966,7 @@ static void drawGridHeader(App& a) {
         a.sortMenuOpen = !a.sortMenuOpen;
         a.sortMenuRect = sortBtn;
     }
-    g.text(ico::Sort, g.fIcon.Get(), rectOf(sortBtn.left + g.s(6.f), sortBtn.top, g.s(20.f), rh(sortBtn)),
+    g.icon(ico::Sort, g.fIcon.Get(), rectOf(sortBtn.left + g.s(6.f), sortBtn.top, g.s(20.f), rh(sortBtn)),
            a.th.textDim, DWRITE_TEXT_ALIGNMENT_CENTER);
 
     // Thumbnail size stepper.
@@ -2052,8 +2077,8 @@ static void drawGrid(App& a) {
                 float bw = g.s(26.f), bh = g.s(18.f);
                 D2D1_RECT_F badge = rectOf(imgR.left + g.s(8.f), imgR.bottom - bh - g.s(8.f), bw, bh);
                 g.roundRect(badge, g.s(4.f), D2D1::ColorF(0, 0, 0, 0.62f));
-                g.text(isAudioPath(p) ? ico::Music : ico::Play, g.fIconSmall.Get(), badge,
-                       D2D1::ColorF(1, 1, 1, 0.95f), DWRITE_TEXT_ALIGNMENT_CENTER);
+                g.icon(isAudioPath(p) ? ico::Music : ico::Play, g.fIconSmall.Get(), badge,
+                       D2D1::ColorF(1, 1, 1, 0.95f));
             }
 
             if (cur) g.roundRectStroke(imgR, g.s(6.f), a.th.accent, g.s(2.f));
@@ -3005,8 +3030,7 @@ static void drawSettings(App& a) {
         else if (hovered) g.roundRect(ir, g.s(6.f), a.th.cardHover);
 
         if (iconOnly) {
-            g.text(navIcons[i], g.fIcon.Get(), ir, sel ? a.th.accent : a.th.textDim,
-                   DWRITE_TEXT_ALIGNMENT_CENTER);
+            g.icon(navIcons[i], g.fIcon.Get(), ir, sel ? a.th.accent : a.th.textDim);
             if (sel)
                 g.roundRect(rectOf((ir.left + ir.right) * .5f - g.s(9.f), ir.bottom - g.s(3.f),
                                    g.s(18.f), g.s(2.5f)), g.s(1.2f), a.th.accent);
@@ -3015,8 +3039,8 @@ static void drawSettings(App& a) {
             if (sel)
                 g.roundRect(rectOf(ir.left + g.s(2.f), (ir.top + ir.bottom) * .5f - g.s(9.f),
                                    g.s(3.f), g.s(18.f)), g.s(1.5f), a.th.accent);
-            g.text(navIcons[i], g.fIcon.Get(), rectOf(ir.left + g.s(12.f), ir.top, g.s(24.f), rh(ir)),
-                   sel ? a.th.accent : a.th.textDim, DWRITE_TEXT_ALIGNMENT_CENTER);
+            g.icon(navIcons[i], g.fIcon.Get(), rectOf(ir.left + g.s(12.f), ir.top, g.s(24.f), rh(ir)),
+                   sel ? a.th.accent : a.th.textDim);
             g.text(navNames[i], g.fBody.Get(), rectOf(ir.left + g.s(44.f), ir.top, rw(ir) - g.s(50.f), rh(ir)),
                    sel ? a.th.text : a.th.textDim);
         }
