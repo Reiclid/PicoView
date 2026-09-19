@@ -40,6 +40,7 @@ const Tr kTable[] = {
 { L"Переглядач  (Esc)", L"Viewer  (Esc)", L"Просмотрщик  (Esc)" },
 { L"Відкрити файл  (Ctrl+O)", L"Open file  (Ctrl+O)", L"Открыть файл  (Ctrl+O)" },
 { L" зображень", L" images", L" изображений" },
+{ L" файлів", L" files", L" файлов" },
 { L"Швидкий переглядач зображень", L"Fast image viewer", L"Быстрый просмотрщик изображений" },
 { L"Гарячі клавіші  (F1)", L"Keyboard shortcuts  (F1)", L"Горячие клавиши  (F1)" },
 { L"Налаштування  (Ctrl+,)", L"Settings  (Ctrl+,)", L"Настройки  (Ctrl+,)" },

@@ -439,6 +439,7 @@ public:
     int  indexOf(const wstring& fileName) const;
     const wstring& dir() const { return dir_; }
     size_t count() const { return files_.size(); }
+    size_t mediaCount() const { return media_; }   // of those, audio or video
     const FileEntry& at(size_t i) const { return files_[i]; }
     wstring pathAt(size_t i) const { return joinPath(dir_, files_[i].name); }
     void removeAt(size_t i);
@@ -446,6 +447,7 @@ public:
 private:
     wstring                dir_;
     std::vector<FileEntry> files_;
+    size_t                 media_ = 0;
 };
 
 // ---------------------------------------------------------------- graphics

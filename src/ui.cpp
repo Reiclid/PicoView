@@ -636,7 +636,8 @@ static void drawTitlebar(App& a) {
     auto pic = a.current();
     if (a.view == View::Grid) {
         title = a.folder.dir().empty() ? L"PicoView" : fileNameOf(a.folder.dir());
-        sub = a.folder.count() ? (std::to_wstring(a.folder.count()) + T(L" зображень")) : L"";
+        sub = a.folder.count() ? (std::to_wstring(a.folder.count()) +
+                                  (a.folder.mediaCount() ? T(L" файлів") : T(L" зображень"))) : L"";
     } else if (a.videoMode) {
         title = fileNameOf(a.currentPath());
         if (a.audioOnly() && !a.audioTags.artist.empty()) sub = a.audioTags.artist;
@@ -1752,7 +1753,8 @@ static void drawFilmstrip(App& a) {
             if (fade < 1.f) a.requestAnim();
             g.dc->DrawBitmap(tb->bmp.Get(), dst, fade * op, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
         } else if (tb && tb->failed) {
-            g.text(ico::Photo, g.fIcon.Get(), cell, alpha(a.th.textMute, op), DWRITE_TEXT_ALIGNMENT_CENTER);
+            g.text(isAudioPath(p) ? ico::Music : ico::Photo, g.fIcon.Get(), cell,
+                   alpha(a.th.textMute, op), DWRITE_TEXT_ALIGNMENT_CENTER);
         }
 
         if (isMediaPath(p)) {
@@ -1903,7 +1905,8 @@ static void drawGrid(App& a) {
                 if (fade < 1.f) a.requestAnim();
                 g.dc->DrawBitmap(tb->bmp.Get(), dst, fade, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
             } else if (tb && tb->failed) {
-                g.text(ico::Photo, g.fIconBig.Get(), imgR, a.th.textMute, DWRITE_TEXT_ALIGNMENT_CENTER);
+                g.text(isAudioPath(p) ? ico::Music : ico::Photo, g.fIconBig.Get(), imgR,
+                       a.th.textMute, DWRITE_TEXT_ALIGNMENT_CENTER);
             } else {
                 drawSpinner(g, D2D1::Point2F((imgR.left + imgR.right) / 2, (imgR.top + imgR.bottom) / 2),
                             g.s(9.f), a.th.textMute, nowSec());

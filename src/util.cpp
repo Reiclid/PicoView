@@ -382,6 +382,7 @@ static bool entryLess(const FileEntry& a, const FileEntry& b) {
 void ImageFolder::scan(const wstring& dir, SortBy by, bool desc) {
     dir_ = dir;
     files_.clear();
+    media_ = 0;
     if (dir.empty()) return;
 
     WIN32_FIND_DATAW fd{};
@@ -393,7 +394,9 @@ void ImageFolder::scan(const wstring& dir, SortBy by, bool desc) {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         if (fd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) continue;
         wstring ext = extOf(fd.cFileName);
-        if (!decodeIsSupported(ext) && !isMediaExt(ext)) continue;
+        bool media = isMediaExt(ext);
+        if (!decodeIsSupported(ext) && !media) continue;
+        if (media) ++media_;
         FileEntry e;
         e.name = fd.cFileName;
         e.size = ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
@@ -417,7 +420,9 @@ int ImageFolder::indexOf(const wstring& fileName) const {
 }
 
 void ImageFolder::removeAt(size_t i) {
-    if (i < files_.size()) files_.erase(files_.begin() + i);
+    if (i >= files_.size()) return;
+    if (isMediaExt(extOf(files_[i].name)) && media_) --media_;
+    files_.erase(files_.begin() + i);
 }
 
 // ------------------------------------------------------------------ settings
