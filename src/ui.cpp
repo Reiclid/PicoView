@@ -886,13 +886,6 @@ static void drawAudioStage(App& a, D2D1_RECT_F cv) {
     wstring line2 = tg.artist;
     if (!tg.album.empty()) line2 += (line2.empty() ? L"" : L"  ·  ") + tg.album;
 
-    float capH = g.s(96.f);
-    float side = clampf(std::min(rw(cv) - g.s(64.f), rh(cv) - capH - g.s(56.f)),
-                        g.s(72.f), g.s(300.f));
-    float top = (cv.top + cv.bottom - (side + capH)) * .5f;
-    D2D1_RECT_F art = rectOf((cv.left + cv.right - side) * .5f, top, side, side);
-    float rad = g.s(14.f);
-
     // Album art comes from the shell, which extracts whatever the file embeds.
     auto tb = a.thumbFor(path, 512, true);
     // A 160 px grid thumbnail blown up to the size of a sleeve looks like a
@@ -911,6 +904,13 @@ static void drawAudioStage(App& a, D2D1_RECT_F cv) {
     float artFade = haveArt ? clampf((float)((nowSec() - tb->arrivedAt) * 5.0), 0.f, 1.f) : 0.f;
     bool noArt = madeUp || (tb && tb->failed);
     if (noArt && a.envelope.path() != path) a.envelope.open(path);
+
+    float capH = g.s(96.f);
+    float side = clampf(std::min(rw(cv) - g.s(64.f), rh(cv) - capH - g.s(56.f)),
+                        g.s(72.f), g.s(300.f));
+    float top = (cv.top + cv.bottom - (side + capH)) * .5f;
+    D2D1_RECT_F art = rectOf((cv.left + cv.right - side) * .5f, top, side, side);
+    float rad = g.s(14.f);
 
     float level = 0.f, bass = 0.f;
     bool playing = a.video.playing();

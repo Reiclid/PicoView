@@ -16,6 +16,7 @@ struct BlobConstants {
     float params[4];        // shape count, blend radius, seed, rotation speed
     float form[4];          // twist, mirror fold, step scale, unused
     float mat[4];           // dispersion, frost, absorption, opacity
+    float glass[4];         // rgb what the material lets through
     float shapeA[8][4];     // xyz centre, w radius
     float shapeB[8][4];     // xyz reach / axis / extents, w kind + secondary radius
 };
@@ -138,10 +139,14 @@ ID2D1Bitmap1* BlobRenderer::frame(const CoverPlan& plan, int size, float time,
     // shorter steps or it walks straight through the surface.
     c.form[2] = (fabsf(plan.twist) > 0.01f || plan.mirror > 0.01f) ? 0.55f : 0.85f;
 
-    c.mat[0] = 0.20f;                                // how far the channels part
-    c.mat[1] = 0.014f;                                // frost on the surface
-    c.mat[2] = 1.10f;                                 // absorption through thickness
-    c.mat[3] = 1.35f;                                 // overall opacity
+    // The track's own colour, as what the glass lets through. The lamps stay
+    // white; this is the light that survives the trip across the body.
+    coverHsl(plan.hue, 0.72f, 0.62f, c.glass[0], c.glass[1], c.glass[2]);
+
+    c.mat[0] = 0.42f;                                // how far the channels part
+    c.mat[1] = 0.004f;                                // frost on the surface
+    c.mat[2] = 1.15f;                                 // absorption through thickness
+    c.mat[3] = 1.15f;                                 // overall opacity
 
     for (int i = 0; i < n; ++i) {
         const CoverLobe& b = plan.lobes[i];

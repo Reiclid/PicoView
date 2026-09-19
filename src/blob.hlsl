@@ -17,6 +17,7 @@ cbuffer Scene : register(b0) {
     float4 uParams;      // x shape count, y blend radius, z seed, w rotation
     float4 uForm;        // x twist, y mirror fold, z step scale, w unused
     float4 uMat;         // x dispersion, y frost, z absorption, w opacity
+    float4 uGlass;       // rgb what the material lets through, w unused
     float4 uShapeA[8];   // xyz centre, w radius
     float4 uShapeB[8];   // xyz reach / axis / extents, w kind + secondary radius
 };
@@ -127,15 +128,16 @@ float3x3 rotX(float a) {
 }
 
 // ------------------------------------------------------------------ light
-// A plain white studio: a bright side, a dark floor, three hard lamps.
-// Nothing here is coloured, deliberately - every colour in the picture is the
-// object splitting this light.
+// A plain white studio, and everything in it is broad and soft. That matters
+// more than it sounds: a hard little lamp makes the three refracted channels
+// land on hard little edges, which is a rainbow fringe. Broad sources make
+// them land on a gradient, which is the pastel wash these objects want.
 float3 env(float3 d) {
-    float up = saturate(d.y * 0.5 + 0.5);
-    float3 c = lerp(float3(0.16, 0.17, 0.20), float3(0.98, 0.99, 1.04), up * up);
-    c += pow(saturate(dot(d, normalize(float3(-0.52, 0.70, -0.45)))), 60.0) * 9.0;
-    c += pow(saturate(dot(d, normalize(float3(0.76, 0.22, -0.52)))), 80.0) * 7.0;
-    c += pow(saturate(dot(d, normalize(float3(0.10, -0.72, -0.60)))), 50.0) * 4.0;
+    float up = d.y * 0.5 + 0.5;
+    float3 c = lerp(float3(0.07, 0.08, 0.10), float3(0.72, 0.74, 0.80), up * up);
+    c += pow(saturate(dot(d, normalize(float3(-0.45, 0.72, -0.50)))), 3.5) * 1.45;
+    c += pow(saturate(dot(d, normalize(float3(0.76, 0.18, -0.38)))), 6.0) * 1.25;
+    c += pow(saturate(dot(d, normalize(float3(0.10, -0.55, 0.80)))), 8.0) * 0.85;
     return c;
 }
 
@@ -171,62 +173,79 @@ float4 PSMain(VSOut input) : SV_Target {
     if (hit) {
         float3 p = ro + rd * t;
         float3 n = normalAt(p);
-        // Frosted, not polished. The grain on the normal is most of what
-        // separates a rain sheet from a glass marble.
-        n = normalize(n + 0.17 * (float3(noise3(p * 15.0 + 3.1),
-                                         noise3(p * 15.0 + 7.7),
-                                         noise3(p * 15.0 + 11.3)) - 0.5));
+        // Barely roughened. Grain was making it look like smoke; what these
+        // objects actually are is smooth, with everything inside them soft
+        // because the material scatters, not because the surface is dirty.
+        n = normalize(n + 0.035 * (float3(noise3(p * 9.0 + 3.1),
+                                          noise3(p * 9.0 + 7.7),
+                                          noise3(p * 9.0 + 11.3)) - 0.5));
 
         // How much material is behind this point, sampled a few steps in.
         float thick = 0.0;
-        [unroll] for (int s = 1; s <= 5; ++s)
-            thick += saturate(-map(p + rd * (0.13 * s)) * 2.2);
-        thick *= 0.2;
+        [unroll] for (int s = 1; s <= 6; ++s)
+            thick += saturate(-map(p + rd * (0.22 * s)) * 1.6);
+        thick *= 0.1667;
 
-        float fres = pow(1.0 - saturate(dot(n, -rd)), 3.0);
+        float fres = pow(1.0 - saturate(dot(n, -rd)), 3.2);
 
-        // The three channels bend by different amounts. That difference is
-        // the whole palette: white light in, colour out.
+        // White light in, colour out. The three channels bend by different
+        // amounts, and because the studio is one big soft gradient they come
+        // apart into a wash across the whole body rather than a fringe at the
+        // edge. This is the only place any colour is created.
         float disp = uMat.x;
         float3 tr;
         tr.r = env(refract(rd, n, 1.0 / (1.45 - disp))).r;
         tr.g = env(refract(rd, n, 1.0 / 1.45)).g;
         tr.b = env(refract(rd, n, 1.0 / (1.45 + disp))).b;
 
-        // A second, rougher sample: frosted plastic scatters what passes it.
-        float3 nb = normalize(n + 0.45 * (float3(noise3(p * 6.0 + 21.0),
-                                                 noise3(p * 6.0 + 37.0),
-                                                 noise3(p * 6.0 + 53.0)) - 0.5));
-        tr = lerp(tr, env(refract(rd, nb, 1.0 / 1.45)), 0.30);
+        // Scattering: a second, much softer sample, mixed in heavily. This is
+        // what makes the inside of the object look blurred instead of clear.
+        float3 nb = normalize(n + 0.55 * (float3(noise3(p * 3.4 + 21.0),
+                                                 noise3(p * 3.4 + 37.0),
+                                                 noise3(p * 3.4 + 53.0)) - 0.5));
+        float3 soft;
+        soft.r = env(refract(rd, nb, 1.0 / (1.45 - disp * 0.6))).r;
+        soft.g = env(refract(rd, nb, 1.0 / 1.45)).g;
+        soft.b = env(refract(rd, nb, 1.0 / (1.45 + disp * 0.6))).b;
+        tr = lerp(tr, soft, 0.62);
 
-        // Thick parts swallow more of the short wavelengths, the way a real
-        // block of plastic goes warm through the middle.
-        tr *= exp(-thick * uMat.z * float3(0.55, 0.78, 1.0));
+        // Where the colour actually comes from. White light goes in; the
+        // material absorbs some wavelengths faster than others along the way,
+        // so a thin edge stays white and a thick middle arrives tinted. That
+        // is how a block of coloured glass works, and it gives the soft
+        // gradient across the body rather than a fringe at the rim.
+        // The glass has a colour of its own, which is what survives the trip:
+        // a thin edge passes almost everything and stays pale, a thick middle
+        // keeps only what the material lets through and arrives saturated.
+        float3 glass = lerp(uGlass.rgb, float3(1, 1, 1), 0.16);
+        tr *= glass;
+        tr *= exp(-thick * uMat.z * 2.6 * (1.0 - uGlass.rgb));
+        tr += uGlass.rgb * 0.16 * (1.0 - thick);               // milk, tinted
 
-        // A grazing edge reflects, but only so far: let it reach pure white
-        // and the object grows an outline it should not have.
-        float3 refl = env(reflect(rd, n));
-        col = lerp(tr, refl, saturate(0.05 + 0.42 * fres));
-        col *= 1.18;
+        // One broad highlight rather than a sharp one: soft plastic, not glass.
+        float3 hv = normalize(normalize(float3(-0.45, 0.72, -0.50)) - rd);
+        float gloss = pow(saturate(dot(n, hv)), 13.0) * 0.95;
 
-        // Thin-film interference: the same white light, split again by the
-        // skin of the material. This is where most of the colour comes from
-        // on a surface this soft - pure refraction only paints the edges.
-        float film = thick * 3.2 + fres * 1.6 + noise3(p * 4.0) * 0.35;
-        float3 irid = 0.5 + 0.5 * cos(6.2831 * (film + float3(0.00, 0.33, 0.67)));
-        col *= 0.86 + 0.34 * irid;
-        col += irid * (0.10 + 0.55 * fres) * (0.4 + 0.6 * uTime.z);
-        // Frost is uneven, and that unevenness is what reads as plastic.
-        col *= (0.84 + 0.32 * noise3(p * 34.0 + uTime.x * 0.1)) * 1.30;
+        // The reflection splits as well, which is what puts colour along the
+        // edge instead of a grey sheen.
+        float3 rr = reflect(rd, n);
+        float3 refl;
+        refl.r = env(normalize(rr + n * disp * 0.30)).r;
+        refl.g = env(rr).g;
+        refl.b = env(normalize(rr - n * disp * 0.30)).b;
+        col = lerp(tr, refl, saturate(0.04 + 0.34 * fres));
+        col += gloss;
+        col *= 1.10;
 
         // How much of the window behind it this pixel hides.
-        alpha = saturate((0.34 + 0.52 * thick + 0.26 * fres) * uMat.w);
+        alpha = saturate((0.62 + 0.34 * thick + 0.18 * fres) * uMat.w);
     }
 
     // The halo is light: it adds without hiding anything behind it.
     col = col * alpha + glow * float3(0.86, 0.89, 1.0) * 0.85;
     alpha = saturate(alpha + glow * 0.30);
 
-    col += (hash13(float3(uv * 1400.0, uParams.z + 2.0)) - 0.5) * 0.020 * alpha;
+    // Just enough grain to stop the gradients banding on an 8-bit target.
+    col += (hash13(float3(uv * 1400.0, uParams.z + 2.0)) - 0.5) * 0.006 * alpha;
     return float4(max(col, 0.0), alpha);
 }
