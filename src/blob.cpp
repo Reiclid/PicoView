@@ -127,56 +127,43 @@ ID2D1Bitmap1* BlobRenderer::frame(const CoverPlan& plan, int size, float time,
 
     int n = (int)std::min<size_t>(plan.lobes.size(), 8);
     c.params[0] = (float)n;
-    // The beat does not only move the parts, it melts them together: the
-    // blend radius opens up on the kick, so the whole thing swells as one.
-    c.params[1] = 0.34f + 0.22f * pulse;
+    // The body is one sphere; the beat inflates it.
+    c.params[1] = 0.60f + 0.13f * pulse;
     c.params[2] = plan.spread * 37.0f;                // any stable per-track number
     c.params[3] = 0.32f + plan.rot * 0.9f;            // rotation speed and direction
 
     c.form[0] = plan.twist;
     c.form[1] = plan.mirror;
-    // Wringing or folding space stretches distances, so the march has to take
-    // shorter steps or it walks straight through the surface.
-    c.form[2] = (fabsf(plan.twist) > 0.01f || plan.mirror > 0.01f) ? 0.55f : 0.85f;
+    c.form[2] = 0.55f;                                // a field, so short steps
 
     // The track's own colour, as what the glass lets through. The lamps stay
     // white; this is the light that survives the trip across the body.
     coverHsl(plan.hue, 0.72f, 0.62f, c.glass[0], c.glass[1], c.glass[2]);
 
-    c.mat[0] = 0.42f;                                // how far the channels part
+    c.mat[0] = 0.42f;                                 // how far the channels part
     c.mat[1] = 0.004f;                                // frost on the surface
     c.mat[2] = 1.15f;                                 // absorption through thickness
     c.mat[3] = 1.15f;                                 // overall opacity
 
     for (int i = 0; i < n; ++i) {
         const CoverLobe& b = plan.lobes[i];
-        // Every part travels its own path, at its own rate, on all three axes.
-        // They drift through each other and come apart again, which is the
-        // point of building the thing out of a field instead of a mesh.
+        // Control points, not parts. Each wanders on its own path; where one
+        // passes near the surface it swells out, and the ones with a negative
+        // amplitude press a hollow in instead. The silhouette goes from round
+        // to lobed and back without the body ever coming apart.
         float ph = b.phase + time * b.speed * 0.9f;
-        float swell = 1.f + 0.26f * pulse * b.weight;
-        float amp = 0.20f + 0.26f * b.weight;
-        float ox = (b.x - .5f) * 1.25f + amp * sinf(ph * 0.83f + b.bx * 3.1f);
-        float oy = (b.y - .5f) * 1.25f + amp * sinf(ph * 0.61f + b.by * 3.1f);
-        float oz = b.z * 0.85f + amp * 0.8f * cosf(ph * 0.47f + b.bz * 3.1f);
-        c.shapeA[i][0] = ox * swell;
-        c.shapeA[i][1] = oy * swell;
-        c.shapeA[i][2] = oz * swell;
-        c.shapeA[i][3] = b.r * 0.66f * (0.88f + 0.30f * pulse * b.weight);
-
-        // The second vector turns as well, so a limb or a ring is never
-        // pointing the same way twice.
-        float a1 = ph * 0.5f, a2 = ph * 0.37f;
-        float vx = b.bx, vy = b.by, vz = b.bz;
-        float rx = vx * cosf(a1) - vz * sinf(a1);
-        float rz = vx * sinf(a1) + vz * cosf(a1);
-        float ry = vy * cosf(a2) - rz * sinf(a2) * 0.35f;
-        float reach = (b.kind == 1) ? 1.15f : 0.9f;
-        c.shapeB[i][0] = rx * reach;
-        c.shapeB[i][1] = ry * reach;
-        c.shapeB[i][2] = rz * reach;
-        // Whole part is the kind, fraction is the secondary radius.
-        c.shapeB[i][3] = (float)clampi(b.kind, 0, 3) + clampf(b.param, 0.05f, 0.95f);
+        float reach = 0.42f + 0.38f * b.weight;
+        c.shapeA[i][0] = reach * sinf(ph * 0.83f + b.bx * 3.1f);
+        c.shapeA[i][1] = reach * sinf(ph * 0.61f + b.by * 3.1f);
+        c.shapeA[i][2] = reach * cosf(ph * 0.47f + b.bz * 3.1f);
+        // Roughly a third of them dent rather than bulge, which is what gives
+        // the shape a waist instead of just more lumps.
+        float sign = (b.kind == 3) ? -0.75f : 1.f;
+        c.shapeA[i][3] = sign * (0.13f + 0.25f * b.weight) * (0.80f + 0.60f * pulse * b.weight);
+        c.shapeB[i][0] = 0;
+        c.shapeB[i][1] = 0;
+        c.shapeB[i][2] = 0;
+        c.shapeB[i][3] = 0.42f + 0.45f * b.param;      // how wide that pull reaches
     }
 
     D3D11_MAPPED_SUBRESOURCE m{};

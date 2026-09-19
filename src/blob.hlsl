@@ -52,32 +52,15 @@ float noise3(float3 x) {
                      lerp(hash13(i + float3(0, 1, 1)), hash13(i + float3(1, 1, 1)), f.x), f.y), f.z);
 }
 
-// ------------------------------------------------------------------ shapes
-float smin(float a, float b, float k) {
-    float h = saturate(0.5 + 0.5 * (b - a) / k);
-    return lerp(b, a, h) - k * h * (1.0 - h);
-}
+// ------------------------------------------------------------------ shape
+// One body, not a pile of parts. A sphere is the whole object; the control
+// points only pull its surface out or push it in, each from its own place and
+// at its own speed. When they gather it is round, when they spread it grows
+// lobes - but it is always one closed surface, which is what a pile of
+// primitives melted together never quite looks like.
 
-float sdCapsule(float3 p, float3 a, float3 b, float r) {
-    float3 pa = p - a, ba = b - a;
-    float h = saturate(dot(pa, ba) / max(dot(ba, ba), 1e-4));
-    return length(pa - ba * h) - r;
-}
-
-float sdRing(float3 p, float3 c, float3 axis, float major, float minor) {
-    float3 q = p - c;
-    float y = dot(q, axis);
-    float x = length(q - axis * y);
-    return length(float2(x - major, y)) - minor;
-}
-
-float sdRoundBox(float3 p, float3 c, float3 b, float r) {
-    float3 q = abs(p - c) - b;
-    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r;
-}
-
-// Wringing and folding the space is what makes two objects built from the
-// same parts read as different things.
+// Wringing and folding the space is what makes two objects built the same way
+// read as different things.
 float3 deform(float3 p) {
     if (uForm.y > 0.001) p.x = abs(p.x) - uForm.y;
     float a = p.y * uForm.x;
@@ -87,28 +70,18 @@ float3 deform(float3 p) {
 
 float map(float3 pw) {
     float3 p = deform(pw);
-    float d = 1e9;
+    float d = length(p) - uParams.y;                 // the body itself
     int n = (int)uParams.x;
     [loop] for (int i = 0; i < n; ++i) {
-        float3 A = uShapeA[i].xyz;
-        float  r = uShapeA[i].w;
-        float3 B = uShapeB[i].xyz;
-        float  kp = uShapeB[i].w;
-        int    kind = (int)floor(kp);
-        float  minor = max(0.04, frac(kp)) * r;
-
-        float di;
-        if (kind == 1)      di = sdCapsule(p, A, A + B, r * 0.62);
-        else if (kind == 2) di = sdRing(p, A, normalize(B + float3(0, 0, 1e-3)), r, minor);
-        else if (kind == 3) di = sdRoundBox(p, A, abs(B) * r * 0.85, minor);
-        else                di = length(p - A) - r;
-
-        d = smin(d, di, uParams.y);
+        float3 c = uShapeA[i].xyz;
+        float  amp = uShapeA[i].w;                   // negative points dent it
+        float  wid = max(0.12, uShapeB[i].w);
+        float  q = length(p - c) / wid;
+        d -= amp * exp(-q * q);
     }
-    // Frost: a shallow ripple on the surface. Small enough not to break the
-    // distance field, which is why the march below still converges.
-    d += uMat.y * (noise3(p * 7.5 + uTime.x * 0.2) - 0.5);
-    return d;
+    // Everything above is a field, not a distance, so the march is told to
+    // trust it only part way.
+    return d * 0.62;
 }
 
 float3 normalAt(float3 p) {
@@ -128,17 +101,41 @@ float3x3 rotX(float a) {
 }
 
 // ------------------------------------------------------------------ light
-// A plain white studio, and everything in it is broad and soft. That matters
-// more than it sounds: a hard little lamp makes the three refracted channels
-// land on hard little edges, which is a rainbow fringe. Broad sources make
-// them land on a gradient, which is the pastel wash these objects want.
+// A white studio with small, dim lamps. Small, because something has to have
+// an edge before blurring it means anything; dim, because the glare was the
+// first thing wrong with this.
 float3 env(float3 d) {
+    // The lamps drift on their own slow paths, so the light crossing the
+    // object keeps moving even when the object itself is still.
+    float t = uTime.x * 0.23;
+    float3 l0 = normalize(float3(-0.45 + 0.42 * sin(t),        0.72, -0.50 + 0.30 * cos(t * 0.8)));
+    float3 l1 = normalize(float3(0.76,  0.18 + 0.45 * sin(t * 0.7 + 2.1), -0.38 + 0.35 * cos(t * 1.1)));
+    float3 l2 = normalize(float3(0.10 + 0.40 * cos(t * 0.9), -0.55 + 0.25 * sin(t * 0.6),  0.80));
+
     float up = d.y * 0.5 + 0.5;
-    float3 c = lerp(float3(0.07, 0.08, 0.10), float3(0.72, 0.74, 0.80), up * up);
-    c += pow(saturate(dot(d, normalize(float3(-0.45, 0.72, -0.50)))), 3.5) * 1.45;
-    c += pow(saturate(dot(d, normalize(float3(0.76, 0.18, -0.38)))), 6.0) * 1.25;
-    c += pow(saturate(dot(d, normalize(float3(0.10, -0.55, 0.80)))), 8.0) * 0.85;
+    float3 c = lerp(float3(0.05, 0.055, 0.07), float3(0.40, 0.42, 0.48), up * up);
+    c += pow(saturate(dot(d, l0)), 30.0) * 2.60;
+    c += pow(saturate(dot(d, l1)), 44.0) * 1.70;
+    c += pow(saturate(dot(d, l2)), 36.0) * 1.10;
     return c;
+}
+
+// Frosted glass does not bend light one way, it bends it every way at once.
+// Taking one sample and jittering the normal only makes the surface look
+// dirty; taking several and averaging them is the blur itself, and the three
+// channels take slightly different paths through it.
+float3 blurThrough(float3 rd, float3 n, float disp, float rough, float3 seed) {
+    float3 acc = 0;
+    [unroll] for (int k = 0; k < 6; ++k) {
+        float3 j = float3(noise3(seed + k * 13.1),
+                          noise3(seed + k * 7.7 + 31.0),
+                          noise3(seed + k * 5.3 + 67.0)) - 0.5;
+        float3 nn = normalize(n + rough * j);
+        acc.r += env(refract(rd, nn, 1.0 / (1.45 - disp))).r;
+        acc.g += env(refract(rd, nn, 1.0 / 1.45)).g;
+        acc.b += env(refract(rd, nn, 1.0 / (1.45 + disp))).b;
+    }
+    return acc / 6.0;
 }
 
 float4 PSMain(VSOut input) : SV_Target {
@@ -188,54 +185,45 @@ float4 PSMain(VSOut input) : SV_Target {
 
         float fres = pow(1.0 - saturate(dot(n, -rd)), 3.2);
 
-        // White light in, colour out. The three channels bend by different
-        // amounts, and because the studio is one big soft gradient they come
-        // apart into a wash across the whole body rather than a fringe at the
-        // edge. This is the only place any colour is created.
-        float disp = uMat.x;
-        float3 tr;
-        tr.r = env(refract(rd, n, 1.0 / (1.45 - disp))).r;
-        tr.g = env(refract(rd, n, 1.0 / 1.45)).g;
-        tr.b = env(refract(rd, n, 1.0 / (1.45 + disp))).b;
+        // What you see through it, genuinely blurred: six paths through the
+        // surface, averaged. Thin parts scatter less than thick ones, the way
+        // a sheet of frosted plastic goes from hazy to opaque as it thickens.
+        float rough = 0.09 + 0.34 * thick;
+        float3 tr = blurThrough(rd, n, uMat.x, rough, p * 3.0 + uTime.x * 0.05);
 
-        // Scattering: a second, much softer sample, mixed in heavily. This is
-        // what makes the inside of the object look blurred instead of clear.
-        float3 nb = normalize(n + 0.55 * (float3(noise3(p * 3.4 + 21.0),
-                                                 noise3(p * 3.4 + 37.0),
-                                                 noise3(p * 3.4 + 53.0)) - 0.5));
-        float3 soft;
-        soft.r = env(refract(rd, nb, 1.0 / (1.45 - disp * 0.6))).r;
-        soft.g = env(refract(rd, nb, 1.0 / 1.45)).g;
-        soft.b = env(refract(rd, nb, 1.0 / (1.45 + disp * 0.6))).b;
-        tr = lerp(tr, soft, 0.62);
-
-        // Where the colour actually comes from. White light goes in; the
-        // material absorbs some wavelengths faster than others along the way,
-        // so a thin edge stays white and a thick middle arrives tinted. That
-        // is how a block of coloured glass works, and it gives the soft
-        // gradient across the body rather than a fringe at the rim.
         // The glass has a colour of its own, which is what survives the trip:
-        // a thin edge passes almost everything and stays pale, a thick middle
+        // a thin edge passes nearly everything and stays pale, a thick middle
         // keeps only what the material lets through and arrives saturated.
         float3 glass = lerp(uGlass.rgb, float3(1, 1, 1), 0.16);
         tr *= glass;
         tr *= exp(-thick * uMat.z * 2.6 * (1.0 - uGlass.rgb));
         tr += uGlass.rgb * 0.16 * (1.0 - thick);               // milk, tinted
 
-        // One broad highlight rather than a sharp one: soft plastic, not glass.
-        float3 hv = normalize(normalize(float3(-0.45, 0.72, -0.50)) - rd);
-        float gloss = pow(saturate(dot(n, hv)), 13.0) * 0.95;
+        // A wide, weak sheen. A frosted surface has no hard highlight on it -
+        // that was the glare.
+        float tl = uTime.x * 0.23;
+        float3 key = normalize(float3(-0.45 + 0.42 * sin(tl), 0.72, -0.50 + 0.30 * cos(tl * 0.8)));
+        float3 hv = normalize(key - rd);
+        float gloss = pow(saturate(dot(n, hv)), 4.0) * 0.22;
 
-        // The reflection splits as well, which is what puts colour along the
-        // edge instead of a grey sheen.
+        // The reflection is blurred too, and split, which is what colours the
+        // rim without putting a white line around the object.
         float3 rr = reflect(rd, n);
-        float3 refl;
-        refl.r = env(normalize(rr + n * disp * 0.30)).r;
-        refl.g = env(rr).g;
-        refl.b = env(normalize(rr - n * disp * 0.30)).b;
-        col = lerp(tr, refl, saturate(0.04 + 0.34 * fres));
+        float3 refl = 0;
+        [unroll] for (int k = 0; k < 3; ++k) {
+            float3 j = float3(noise3(p * 5.0 + k * 17.0),
+                              noise3(p * 5.0 + k * 23.0 + 5.0),
+                              noise3(p * 5.0 + k * 29.0 + 9.0)) - 0.5;
+            float3 rn = normalize(rr + 0.22 * j);
+            refl.r += env(normalize(rn + n * uMat.x * 0.25)).r;
+            refl.g += env(rn).g;
+            refl.b += env(normalize(rn - n * uMat.x * 0.25)).b;
+        }
+        refl /= 3.0;
+
+        col = lerp(tr, refl, saturate(0.04 + 0.26 * fres));
         col += gloss;
-        col *= 1.10;
+        col *= 1.22;
 
         // How much of the window behind it this pixel hides.
         alpha = saturate((0.62 + 0.34 * thick + 0.18 * fres) * uMat.w);
