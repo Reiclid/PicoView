@@ -2313,6 +2313,10 @@ static void drawConverter(App& a);
 
 static void drawCompressor(App& a) {
     Gfx& g = a.gfx;
+    // Closed: nothing to draw, and - just as important - no reason to probe
+    // the codecs. That probe costs about 90 ms, and asking for it on every
+    // frame would put all of it into the first one.
+    if (rw(a.R.comp) < g.s(8.f)) return;
     if (a.videoMode) { drawConverter(a); return; }
 
     const auto& formats = encodeFormats();

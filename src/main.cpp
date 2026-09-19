@@ -2599,6 +2599,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
               app.R.canvas.right, app.R.canvas.bottom, app.gfx.width, app.gfx.height);
     }
     ShowWindow(hwnd, app.cfg.maximized ? SW_SHOWMAXIMIZED : SW_SHOW);
+    // Split from the line below on purpose: the gap between them is the cost
+    // of the first paint, which is where a stray probe would hide.
+    pgLog("t+%.1f shown", (nowSec() - app.startupAt) * 1000);
     if (app.cfg.fullscreen) app.setFullscreen(true);
     UpdateWindow(hwnd);
     pgLog("t+%.1f window shown", (nowSec() - app.startupAt) * 1000);
