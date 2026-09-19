@@ -195,7 +195,11 @@ unsigned VideoPlayer::onEvent(unsigned ev, uintptr_t param) {
                 p_->bmp.Reset();
                 return PGV_REPAINT | PGV_SIZED;
             }
-            return PGV_REPAINT;
+            // Music: the duration and the tags are all there is to know, and
+            // the canvas must stop waiting for a frame that will never arrive.
+            p_->metaKnown = true;
+            p_->w = p_->h = 0;
+            return PGV_REPAINT | PGV_SIZED;
         }
         case MF_MEDIA_ENGINE_EVENT_CANPLAY:
             // The engine only honours volume once a source is actually loaded.
@@ -233,6 +237,7 @@ unsigned VideoPlayer::onEvent(unsigned ev, uintptr_t param) {
 }
 
 bool VideoPlayer::isOpen() const { return p_ && p_->opened; }
+bool VideoPlayer::hasVideo() const { return p_ && p_->w > 0 && p_->h > 0; }
 bool VideoPlayer::hasFrame() const { return p_ && p_->bmp; }
 bool VideoPlayer::metaKnown() const { return p_ && p_->metaKnown; }
 int  VideoPlayer::width() const { return p_ ? p_->w : 0; }
@@ -720,6 +725,73 @@ const wchar_t* kVideoExts[] = {
 const std::vector<wstring>& videoExtensions() {
     static std::vector<wstring> v(std::begin(kVideoExts), std::end(kVideoExts));
     return v;
+}
+
+// Everything worth offering, common first. Not all of it plays on every
+// machine, which is what the probe below is for.
+const wchar_t* kAudioCandidates[] = {
+    L".mp3", L".wav", L".flac", L".m4a", L".aac", L".wma", L".ogg", L".oga",
+    L".opus", L".aiff", L".aif", L".alac", L".ac3", L".ec3", L".amr",
+    L".adt", L".adts", L".mpa", L".mp2", L".mka", L".weba", L".wv", L".dsf"
+};
+
+// Media Foundation finds a source by extension, through a byte-stream handler
+// registered under this key. Asking the registry is how we know what the engine
+// will really open: a codec pack that adds Ogg shows up without a new build,
+// and nothing we list turns out to be a dead end.
+static bool mfHandlesExt(const wchar_t* ext) {
+    const wchar_t* base = L"SOFTWARE\\Microsoft\\Windows Media Foundation\\ByteStreamHandlers\\";
+    for (HKEY root : { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER }) {
+        HKEY k = nullptr;
+        if (RegOpenKeyExW(root, (wstring(base) + ext).c_str(), 0, KEY_READ, &k) == ERROR_SUCCESS) {
+            RegCloseKey(k);
+            return true;
+        }
+    }
+    return false;
+}
+
+const std::vector<wstring>& audioExtensions() {
+    static std::vector<wstring> v;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        for (const wchar_t* e : kAudioCandidates)
+            if (mfHandlesExt(e)) v.push_back(e);
+        // Never end up with nothing: these three are part of Windows itself.
+        if (v.empty()) v = { L".mp3", L".wav", L".flac" };
+    });
+    return v;
+}
+
+bool isAudioExt(const wstring& ext) {
+    if (ext.empty()) return false;
+    wstring e = lowerOf(ext);
+    for (const auto& v : audioExtensions()) if (v == e) return true;
+    return false;
+}
+
+bool isAudioPath(const wstring& path) { return isAudioExt(extOf(path)); }
+
+void readAudioTags(const wstring& path, AudioTags& out) {
+    out = AudioTags();
+    ComPtr<IShellItem2> item;
+    if (FAILED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&item))) || !item)
+        return;
+
+    auto str = [&](REFPROPERTYKEY key) -> wstring {
+        PWSTR raw = nullptr;
+        wstring r;
+        if (SUCCEEDED(item->GetString(key, &raw)) && raw) { r = raw; CoTaskMemFree(raw); }
+        return r;
+    };
+    out.title = str(PKEY_Title);
+    out.artist = str(PKEY_Music_Artist);
+    if (out.artist.empty()) out.artist = str(PKEY_Music_AlbumArtist);
+    out.album = str(PKEY_Music_AlbumTitle);
+
+    ULONG n = 0;
+    if (SUCCEEDED(item->GetUInt32(PKEY_Music_TrackNumber, &n))) out.track = (int)n;
+    if (SUCCEEDED(item->GetUInt32(PKEY_Media_Year, &n))) out.year = (int)n;
 }
 
 bool isVideoExt(const wstring& ext) {

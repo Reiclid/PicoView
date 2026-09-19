@@ -447,9 +447,17 @@ const std::vector<wstring>& decodeExtensions() { return g_exts; }
 IWICImagingFactory2* pgWic() { return g_wic.Get(); }
 
 wstring decodeFilterString() {
-    wstring all;
-    for (const auto& e : g_exts) { if (!all.empty()) all += L";"; all += L"*" + e; }
-    wstring f = T(L"Зображення|") + all + T(L"|Усі файли|*.*|");
+    auto join = [](const std::vector<wstring>& v) {
+        wstring s;
+        for (const auto& e : v) { if (!s.empty()) s += L";"; s += L"*" + e; }
+        return s;
+    };
+    wstring pics = join(g_exts), vids = join(videoExtensions()), auds = join(audioExtensions());
+    wstring f = T(L"Усі підтримувані|") + pics + L";" + vids + L";" + auds +
+                T(L"|Зображення|") + pics +
+                T(L"|Відео|") + vids +
+                T(L"|Аудіо|") + auds +
+                T(L"|Усі файли|*.*|");
     for (auto& c : f) if (c == L'|') c = L'\0';
     return f;
 }

@@ -393,7 +393,7 @@ void ImageFolder::scan(const wstring& dir, SortBy by, bool desc) {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         if (fd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) continue;
         wstring ext = extOf(fd.cFileName);
-        if (!decodeIsSupported(ext) && !isVideoExt(ext)) continue;
+        if (!decodeIsSupported(ext) && !isMediaExt(ext)) continue;
         FileEntry e;
         e.name = fd.cFileName;
         e.size = ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;

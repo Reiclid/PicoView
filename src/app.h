@@ -219,6 +219,10 @@ struct App {
     float        compScroll = 0, compScrollMax = 0;
     float        compAnim = 0.f;          // 0 closed, 1 fully slid in
 
+    wstring   audioTagsPath;         // whose tags audioTags holds
+    AudioTags audioTags;
+    wstring   coverUpgraded;         // cover art already re-fetched at full size
+
     wstring mediaPropsPath;
     std::vector<std::pair<wstring, wstring>> mediaProps;
     bool   needRelayout = true;
@@ -254,6 +258,8 @@ struct App {
     // In "window follows the picture" the title bar floats over the image and
     // fades with the command bar, so the window is exactly the picture.
     bool titleOverlay() const { return cfg.autoSize == 2 && !fullscreen; }
+    // Music plays through the same engine as video; there is simply no picture.
+    bool audioOnly() const { return videoMode && !video.hasVideo(); }
     void copyToClipboard();
     void deleteCurrent();
     void openFileDialog();

@@ -272,8 +272,23 @@ private:
 const std::vector<wstring>& videoExtensions();
 bool    isVideoExt(const wstring& ext);
 bool    isVideoPath(const wstring& path);
+
+// Music files play through the same engine; only the canvas differs.
+const std::vector<wstring>& audioExtensions();
+bool    isAudioExt(const wstring& ext);
+bool    isAudioPath(const wstring& path);
+inline bool isMediaExt(const wstring& ext)  { return isVideoExt(ext) || isAudioExt(ext); }
+inline bool isMediaPath(const wstring& path) { return isVideoPath(path) || isAudioPath(path); }
+
 wstring formatTime(double seconds);
 void    readMediaProps(const wstring& path, std::vector<std::pair<wstring, wstring>>& out);
+
+// Title / artist / album, as the shell already has them indexed.
+struct AudioTags {
+    wstring title, artist, album;
+    int     track = 0, year = 0;
+};
+void readAudioTags(const wstring& path, AudioTags& out);
 
 // What onEvent() wants the app to do next.
 enum { PGV_REPAINT = 1, PGV_SIZED = 2, PGV_ENDED = 4, PGV_ERROR = 8, PGV_QUIET = 16 };
@@ -292,6 +307,7 @@ public:
     unsigned onEvent(unsigned ev, uintptr_t param); // from WM_PG_VIDEO -> PGV_* flags
 
     bool isOpen() const;
+    bool hasVideo() const;          // false for music: there is no picture
     bool hasFrame() const;
     bool metaKnown() const;
     int  width() const;

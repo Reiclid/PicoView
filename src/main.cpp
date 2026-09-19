@@ -175,7 +175,7 @@ void App::preload() {
         if (cfg.loopFolder) i = ((i % (int)folder.count()) + (int)folder.count()) % (int)folder.count();
         if (i < 0 || i >= (int)folder.count() || i == index) continue;
         wstring p = folder.pathAt(i);
-        if (isVideoPath(p)) continue;              // videos stream, nothing to preload
+        if (isMediaPath(p)) continue;              // media streams, nothing to preload
         auto it = pics.find(p);
         if (it != pics.end() && it->second->bmp) continue;
         requestPicture(p, false, 20 + abs(d));
@@ -381,7 +381,9 @@ void App::openVideo(const wstring& path) {
     if (!videoInit) { showToast(T(L"Media Foundation недоступна")); return; }
 
     if (!video.open(path, cfg.autoPlay)) {
-        showToast(video.error().empty() ? T(L"Не вдалося відкрити відео") : video.error());
+        showToast(video.error().empty()
+                      ? (isAudioPath(path) ? T(L"Не вдалося відкрити аудіо") : T(L"Не вдалося відкрити відео"))
+                      : video.error());
         return;
     }
     video.setVolume(cfg.volume / 100.f);
@@ -465,11 +467,11 @@ void App::goTo(int newIndex, bool resetView) {
 
     if (compOpen) {
         // Videos are not ours to compress; anything else gets a fresh preview.
-        if (isVideoPath(p)) openCompressor(false);
+        if (isMediaPath(p)) openCompressor(false);
         else                compressRequest(true);
     }
 
-    if (isVideoPath(p)) {
+    if (isMediaPath(p)) {
         leaveVideo();
         openVideo(p);
         preload();
@@ -553,7 +555,7 @@ void App::openPath(const wstring& path) {
         if (vs != viewStates.end()) { pendingView = vs->second; hasPendingView = true; }
     }
 
-    if (isVideoPath(path)) {
+    if (isMediaPath(path)) {
         leaveVideo();
         openVideo(path);
         setView(View::Viewer);
@@ -623,12 +625,14 @@ void App::loadAssociations() {
     std::unordered_set<wstring> seen;
     for (const auto& e : decodeExtensions()) if (seen.insert(e).second) assocAll.push_back(e);
     for (const auto& e : videoExtensions()) if (seen.insert(e).second) assocAll.push_back(e);
+    for (const auto& e : audioExtensions()) if (seen.insert(e).second) assocAll.push_back(e);
     std::sort(assocAll.begin(), assocAll.end());
 
     if (cfg.associations.empty()) {
         for (const wchar_t* e : { L".jpg", L".jpeg", L".png", L".gif", L".bmp", L".webp",
                                   L".tif", L".tiff", L".heic", L".avif", L".ico",
-                                  L".mp4", L".mkv", L".mov", L".avi", L".webm" })
+                                  L".mp4", L".mkv", L".mov", L".avi", L".webm",
+                                  L".mp3", L".wav", L".flac", L".m4a" })
             if (seen.count(e)) assocSel.insert(e);
     } else {
         wstring cur;
@@ -1033,7 +1037,7 @@ void App::compressBatch() {
     std::vector<wstring> list;
     for (size_t i = 0; i < folder.count(); ++i) {
         wstring p = joinPath(folder.dir(), folder.at((int)i).name);
-        if (!isVideoPath(p) && decodeIsSupported(extOf(p))) list.push_back(p);
+        if (!isMediaPath(p) && decodeIsSupported(extOf(p))) list.push_back(p);
     }
     if (list.empty()) { showToast(T(L"У папці немає зображень")); return; }
 
@@ -1662,7 +1666,7 @@ static void stepAnimations(App& a, double dt) {
     bool wantBar = (a.view == View::Viewer || a.titleOverlay()) &&
                    (keepBar || idle < hideAfter || a.hot != 0 || a.in.down || a.seekDragging ||
                     a.settingsOpen || a.moreMenuOpen || a.volPopup || a.showHelp ||
-                    (a.videoMode && !a.video.playing()));
+                    (a.videoMode && !a.video.playing()) || a.audioOnly());
     float target = wantBar ? 1.f : 0.f;
     if (fabsf(a.barAlpha - target) > 0.004f) {
         a.barAlpha += (target - a.barAlpha) * (float)(1.0 - pow(0.0005, clampf((float)dt, 0.f, 0.1f)));

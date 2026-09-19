@@ -61,6 +61,8 @@ namespace ico {
     static const wchar_t* Compress = L"";
     static const wchar_t* Crop = L"";
     static const wchar_t* Reset = L"";
+    static const wchar_t* Music = L"";
+    static const wchar_t* Convert = L"";
 }
 
 // --------------------------------------------------------------- frame-local
@@ -636,7 +638,8 @@ static void drawTitlebar(App& a) {
         sub = a.folder.count() ? (std::to_wstring(a.folder.count()) + T(L" зображень")) : L"";
     } else if (a.videoMode) {
         title = fileNameOf(a.currentPath());
-        if (a.video.width() > 0)
+        if (a.audioOnly() && !a.audioTags.artist.empty()) sub = a.audioTags.artist;
+        else if (a.video.width() > 0)
             sub = std::to_wstring(a.video.width()) + L" × " + std::to_wstring(a.video.height());
         double d = a.video.duration();
         if (d > 0) sub += (sub.empty() ? L"" : L"  ·  ") + formatTime(d);
@@ -770,8 +773,90 @@ static void drawEmptyState(App& a, D2D1_RECT_F r) {
 
 static void drawVideoFrame(App& a, D2D1_RECT_F cv);
 
+// Music has no picture, so the canvas becomes a record sleeve: whatever art the
+// file carries, the tags underneath, and the player bar doing everything else.
+static void drawAudioStage(App& a, D2D1_RECT_F cv) {
+    Gfx& g = a.gfx;
+    wstring path = a.currentPath();
+    if (a.audioTagsPath != path) { a.audioTagsPath = path; readAudioTags(path, a.audioTags); }
+
+    const AudioTags& tg = a.audioTags;
+    wstring title = tg.title.empty() ? stemOf(path) : tg.title;
+    wstring line2 = tg.artist;
+    if (!tg.album.empty()) line2 += (line2.empty() ? L"" : L"  ·  ") + tg.album;
+
+    float capH = g.s(96.f);
+    float side = clampf(std::min(rw(cv) - g.s(64.f), rh(cv) - capH - g.s(56.f)),
+                        g.s(72.f), g.s(300.f));
+    float top = (cv.top + cv.bottom - (side + capH)) * .5f;
+    D2D1_RECT_F art = rectOf((cv.left + cv.right - side) * .5f, top, side, side);
+    float rad = g.s(14.f);
+
+    // Album art comes from the shell, which extracts whatever the file embeds.
+    auto tb = a.thumbFor(path, 512, true);
+    // A 160 px grid thumbnail blown up to the size of a sleeve looks like a
+    // mistake, so ask once more for the big one.
+    if (tb && tb->bmp && tb->w < 384 && a.coverUpgraded != path) {
+        a.coverUpgraded = path;
+        a.thumbs.erase(path);
+        tb = a.thumbFor(path, 512, true);
+    }
+
+    shadowPill(g, art, rad, a.th.shadow, 0.85f);
+    if (tb && tb->bmp) {
+        float bw = (float)tb->w, bh = (float)tb->h;
+        float k = std::max(side / bw, side / bh);          // fill the square
+        float dw = bw * k, dh = bh * k;
+        g.pushRoundClip(art, rad);
+        g.dc->DrawBitmap(tb->bmp.Get(),
+                         rectOf((art.left + art.right - dw) * .5f, (art.top + art.bottom - dh) * .5f, dw, dh),
+                         1.f, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+        g.popRoundClip();
+    } else {
+        g.roundRect(art, rad, mix(a.th.card, a.th.accent, 0.16f));
+        float k = std::max(1.f, side / g.s(78.f));
+        D2D1_POINT_2F c{ (art.left + art.right) * .5f, (art.top + art.bottom) * .5f };
+        g.dc->SetTransform(D2D1::Matrix3x2F::Scale(k, k, c));
+        g.text(ico::Music, g.fIconBig.Get(), rectOf(c.x - g.s(30.f), c.y - g.s(30.f), g.s(60.f), g.s(60.f)),
+               alpha(a.th.text, 0.45f), DWRITE_TEXT_ALIGNMENT_CENTER);
+        g.dc->SetTransform(D2D1::Matrix3x2F::Identity());
+        if (tb && !tb->failed && !tb->bmp) a.requestAnim();
+    }
+    g.roundRectStroke(art, rad, alpha(a.th.text, 0.10f), g.s(1.f));
+
+    float y = art.bottom + g.s(20.f);
+
+    // Five bars that dance while the track plays and lie flat when it does not.
+    // Playback already asks for a repaint every frame, so this costs nothing.
+    {
+        float bw = g.s(3.f), gap = g.s(3.f), maxH = g.s(16.f);
+        const int N = 5;
+        float total = N * bw + (N - 1) * gap;
+        float x = (cv.left + cv.right - total) * .5f;
+        bool playing = a.video.playing();
+        double t = nowSec();
+        static const float speed[N] = { 5.3f, 7.1f, 4.2f, 6.4f, 8.0f };
+        static const float phase[N] = { 0.0f, 1.9f, 3.4f, 0.8f, 2.6f };
+        for (int i = 0; i < N; ++i) {
+            float amp = playing ? (0.55f + 0.45f * sinf((float)t * speed[i] + phase[i])) : 0.16f;
+            float h = maxH * clampf(amp, 0.12f, 1.f);
+            g.roundRect(rectOf(x + i * (bw + gap), y + maxH - h, bw, h), bw * .5f,
+                        alpha(a.th.accent, playing ? 0.95f : 0.35f));
+        }
+        y += maxH + g.s(10.f);
+    }
+
+    g.text(fitText(g, title, g.fTitle.Get(), rw(cv) - g.s(48.f)), g.fTitle.Get(),
+           rectOf(cv.left, y, rw(cv), g.s(30.f)), a.th.text, DWRITE_TEXT_ALIGNMENT_CENTER);
+    y += g.s(30.f);
+    if (!line2.empty())
+        g.text(fitText(g, line2, g.fBody.Get(), rw(cv) - g.s(48.f)), g.fBody.Get(),
+               rectOf(cv.left, y, rw(cv), g.s(22.f)), a.th.textDim, DWRITE_TEXT_ALIGNMENT_CENTER);
+}
+
 static void drawVideoFrame(App& a, D2D1_RECT_F cv) {
     Gfx& g = a.gfx;
+    if (a.audioOnly() && a.video.error().empty()) { drawAudioStage(a, cv); return; }
     ID2D1Bitmap1* bmp = a.video.metaKnown() ? a.video.frame(g.dc.Get()) : nullptr;
 
     if (!bmp) {
@@ -1669,12 +1754,12 @@ static void drawFilmstrip(App& a) {
             g.text(ico::Photo, g.fIcon.Get(), cell, alpha(a.th.textMute, op), DWRITE_TEXT_ALIGNMENT_CENTER);
         }
 
-        if (isVideoPath(p)) {
+        if (isMediaPath(p)) {
             float bw = g.s(20.f), bh = g.s(14.f);
             D2D1_RECT_F badge = rectOf(cell.left + g.s(5.f), cell.bottom - bh - g.s(5.f), bw, bh);
             g.roundRect(badge, g.s(3.f), D2D1::ColorF(0, 0, 0, 0.60f * op));
-            g.text(ico::Play, g.fIconSmall.Get(), badge, D2D1::ColorF(1, 1, 1, 0.92f * op),
-                   DWRITE_TEXT_ALIGNMENT_CENTER);
+            g.text(isAudioPath(p) ? ico::Music : ico::Play, g.fIconSmall.Get(), badge,
+                   D2D1::ColorF(1, 1, 1, 0.92f * op), DWRITE_TEXT_ALIGNMENT_CENTER);
         }
 
         if (cur) g.roundRectStroke(cell, g.s(4.f), alpha(a.th.accent, op), g.s(2.f));
@@ -1824,12 +1909,12 @@ static void drawGrid(App& a) {
                 a.requestAnim();
             }
 
-            if (isVideoPath(p)) {
+            if (isMediaPath(p)) {
                 float bw = g.s(26.f), bh = g.s(18.f);
                 D2D1_RECT_F badge = rectOf(imgR.left + g.s(8.f), imgR.bottom - bh - g.s(8.f), bw, bh);
                 g.roundRect(badge, g.s(4.f), D2D1::ColorF(0, 0, 0, 0.62f));
-                g.text(ico::Play, g.fIconSmall.Get(), badge, D2D1::ColorF(1, 1, 1, 0.95f),
-                       DWRITE_TEXT_ALIGNMENT_CENTER);
+                g.text(isAudioPath(p) ? ico::Music : ico::Play, g.fIconSmall.Get(), badge,
+                       D2D1::ColorF(1, 1, 1, 0.95f), DWRITE_TEXT_ALIGNMENT_CENTER);
             }
 
             if (cur) g.roundRectStroke(imgR, g.s(6.f), a.th.accent, g.s(2.f));
@@ -2073,7 +2158,8 @@ static D2D1_RECT_F setLabel(SetRow& s, const wchar_t* label, const wchar_t* hint
 static const wchar_t* const kPopularExts[] = {
     L".jpg", L".jpeg", L".png", L".gif", L".webp", L".bmp", L".tif", L".tiff",
     L".heic", L".heif", L".avif", L".ico", L".jfif", L".jxl", L".psd", L".svg",
-    L".mp4", L".mkv", L".mov", L".avi", L".webm", L".m4v", L".wmv", L".mpg", L".ts"
+    L".mp4", L".mkv", L".mov", L".avi", L".webm", L".m4v", L".wmv", L".mpg", L".ts",
+    L".mp3", L".wav", L".flac", L".m4a", L".aac", L".wma"
 };
 
 static bool isPopularExt(const wstring& e) {
