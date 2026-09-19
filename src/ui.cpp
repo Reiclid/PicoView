@@ -510,7 +510,8 @@ static std::vector<MenuEntry> buildActionMenu(App& a, bool forVideo) {
     sep();
     if (!forVideo) add(CMD_CROP, ico::Crop, T(L"Обрізати"), L"X", a.cropMode || a.cropActive, has);
     if (!forVideo && a.cropActive) add(CMD_CROP_RESET, ico::Reset, T(L"Скинути обрізання"), nullptr);
-    if (!forVideo) add(CMD_COMPRESS, ico::Compress, T(L"Стиснути та конвертувати"), L"Ctrl+E", false, has);
+    if (forVideo) add(CMD_COMPRESS, ico::Convert, T(L"Конвертувати"), L"Ctrl+E", a.compOpen, has);
+    else           add(CMD_COMPRESS, ico::Compress, T(L"Стиснути та конвертувати"), L"Ctrl+E", false, has);
     if (!forVideo) add(CMD_COPY, ico::Copy, T(L"Копіювати"), L"Ctrl+C", false, has);
     add(CMD_REVEAL, ico::Reveal, T(L"Показати в провіднику"), nullptr);
     add(CMD_NEWWINDOW, ico::NewWindow, T(L"Відкрити нове вікно"), L"Ctrl+N");
@@ -1995,6 +1996,22 @@ static void drawInfoPanel(App& a) {
           for (auto& c : e) c = (wchar_t)towupper(c);
           infoRow(a, y, T(L"Тип"), e); }
 
+        // For music, who made it matters more than how it was encoded.
+        if (a.audioOnly()) {
+            if (a.audioTagsPath != path) { a.audioTagsPath = path; readAudioTags(path, a.audioTags); }
+            const AudioTags& tg = a.audioTags;
+            if (!tg.title.empty() || !tg.artist.empty() || !tg.album.empty()) {
+                y += g.s(6.f);
+                g.dc->FillRectangle(rectOf(p.left + pad, y, rw(p) - pad * 2, g.s(1.f)), g.solid(a.th.stroke));
+                y += g.s(16.f);
+                infoRow(a, y, T(L"Назва"), tg.title);
+                infoRow(a, y, T(L"Виконавець"), tg.artist);
+                infoRow(a, y, T(L"Альбом"), tg.album);
+                if (tg.year > 0) infoRow(a, y, T(L"Рік"), std::to_wstring(tg.year));
+                if (tg.track > 0) infoRow(a, y, T(L"Доріжка"), std::to_wstring(tg.track));
+            }
+        }
+
         // Pulled from the shell property store, same source Explorer uses.
         if (a.mediaPropsPath != path) {
             a.mediaPropsPath = path;
@@ -2223,50 +2240,89 @@ static wstring compSizeText(double bytes) {
     return b;
 }
 
-// A panel docked to the right edge rather than a sheet over the picture: the
-// canvas keeps showing the photo, and what it shows is the compressed result.
-static void drawCompressor(App& a) {
-    Gfx& g = a.gfx;
-    D2D1_RECT_F panel = a.R.comp;
-    if (rw(panel) < g.s(8.f)) return;
+// The sliding side panel, shared by the compressor and the media converter:
+// the chrome, the scrolling and the close button are the same job either way.
+struct SidePanel {
+    D2D1_RECT_F panel{}, col{};
+    float y = 0;
+    bool  ok = false;
+};
 
-    const auto& formats = encodeFormats();
-    if (formats.empty()) { a.compOpen = false; return; }
-    const EncFormat& fmt = formats[clampi(a.compFormat, 0, (int)formats.size() - 1)];
+static SidePanel panelBegin(App& a, const wstring& title) {
+    Gfx& g = a.gfx;
+    SidePanel sp;
+    sp.panel = a.R.comp;
+    if (rw(sp.panel) < g.s(8.f)) return sp;
 
     // A real surface, not the bare backdrop: th.chrome is fully transparent, so
     // the panel used to be the blurred desktop, and every hover highlight was
     // composited over whatever moved behind the window.
     D2D1_COLOR_F face = a.th.bar;
     face.a = 0.99f;
-    g.dc->FillRectangle(panel, g.solid(face));
-    g.dc->FillRectangle(rectOf(panel.left, panel.top, g.s(1.f), rh(panel)), g.solid(a.th.stroke));
-    if (inRect(panel, a.in.mouse) && a.in.hasMouse) g_overUi = true;
+    g.dc->FillRectangle(sp.panel, g.solid(face));
+    g.dc->FillRectangle(rectOf(sp.panel.left, sp.panel.top, g.s(1.f), rh(sp.panel)), g.solid(a.th.stroke));
+    if (inRect(sp.panel, a.in.mouse) && a.in.hasMouse) g_overUi = true;
 
     float pad = g.s(16.f);
-    D2D1_RECT_F inner = rectOf(panel.left + pad, panel.top, rw(panel) - pad * 2 - g.s(6.f), rh(panel));
-    if (rw(inner) < g.s(80.f)) return;          // still sliding in
+    D2D1_RECT_F inner = rectOf(sp.panel.left + pad, sp.panel.top,
+                               rw(sp.panel) - pad * 2 - g.s(6.f), rh(sp.panel));
+    if (rw(inner) < g.s(80.f)) return sp;       // still sliding in
 
-    // ---------------- header
     float hdr = g.s(48.f);
-    g.text(T(L"Стиснути та конвертувати"), g.fBodyStrong.Get(),
-           rectOf(inner.left, panel.top, rw(inner) - g.s(34.f), hdr), a.th.text);
+    g.text(title, g.fBodyStrong.Get(),
+           rectOf(inner.left, sp.panel.top, rw(inner) - g.s(34.f), hdr), a.th.text);
     if (button(a, UI_COMP_BASE, CMD_NONE,
-               rectOf(inner.right - g.s(30.f), panel.top + g.s(9.f), g.s(30.f), g.s(30.f)),
+               rectOf(inner.right - g.s(30.f), sp.panel.top + g.s(9.f), g.s(30.f), g.s(30.f)),
                ico::Close, T(L"Закрити  (Esc)"))) {
         a.openCompressor(false);
-        return;
+        return sp;
     }
-    g.dc->FillRectangle(rectOf(panel.left + g.s(1.f), panel.top + hdr, rw(panel), g.s(1.f)),
+    g.dc->FillRectangle(rectOf(sp.panel.left + g.s(1.f), sp.panel.top + hdr, rw(sp.panel), g.s(1.f)),
                         g.solid(a.th.stroke));
 
-    D2D1_RECT_F col = rectOf(inner.left, panel.top + hdr + g.s(10.f), rw(inner),
-                             rh(panel) - hdr - g.s(10.f));
-    if (rh(col) < g.s(40.f)) return;
+    sp.col = rectOf(inner.left, sp.panel.top + hdr + g.s(10.f), rw(inner),
+                    rh(sp.panel) - hdr - g.s(10.f));
+    if (rh(sp.col) < g.s(40.f)) return sp;
 
-    g.dc->PushAxisAlignedClip(rectOf(panel.left, col.top, rw(panel), rh(col)),
+    g.dc->PushAxisAlignedClip(rectOf(sp.panel.left, sp.col.top, rw(sp.panel), rh(sp.col)),
                               D2D1_ANTIALIAS_MODE_ALIASED);
-    float y = col.top - a.compScroll;
+    sp.y = sp.col.top - a.compScroll;
+    sp.ok = true;
+    return sp;
+}
+
+static void panelEnd(App& a, const SidePanel& sp) {
+    Gfx& g = a.gfx;
+    g.dc->PopAxisAlignedClip();
+
+    float contentH = (sp.y + a.compScroll) - sp.col.top;
+    a.compScrollMax = std::max(0.f, contentH - rh(sp.col));
+    a.compScroll = clampf(a.compScroll, 0.f, a.compScrollMax);
+    if (a.compScrollMax > 1.f) {
+        float trackH = rh(sp.col) - g.s(8.f);
+        float thumbH = std::max(g.s(28.f), trackH * (rh(sp.col) / std::max(1.f, contentH)));
+        float t = a.compScroll / a.compScrollMax;
+        g.roundRect(rectOf(sp.panel.right - g.s(6.f), sp.col.top + g.s(4.f) + t * (trackH - thumbH),
+                           g.s(3.f), thumbH), g.s(1.5f), alpha(a.th.text, 0.30f));
+    }
+}
+
+// A panel docked to the right edge rather than a sheet over the picture: the
+// canvas keeps showing the photo, and what it shows is the compressed result.
+static void drawConverter(App& a);
+
+static void drawCompressor(App& a) {
+    Gfx& g = a.gfx;
+    if (a.videoMode) { drawConverter(a); return; }
+
+    const auto& formats = encodeFormats();
+    if (formats.empty()) { a.compOpen = false; return; }
+    const EncFormat& fmt = formats[clampi(a.compFormat, 0, (int)formats.size() - 1)];
+
+    SidePanel sp = panelBegin(a, T(L"Стиснути та конвертувати"));
+    if (!sp.ok) return;
+    D2D1_RECT_F col = sp.col;
+    float y = sp.y;
     float rowH = g.s(22.f);
     auto label = [&](const wchar_t* t) {
         g.text(t, g.fCaption.Get(), rectOf(col.left, y, rw(col), rowH), a.th.textDim);
@@ -2467,18 +2523,8 @@ static void drawCompressor(App& a) {
         y += bh2 + g.s(12.f);
     }
 
-    g.dc->PopAxisAlignedClip();
-
-    float contentH = (y + a.compScroll) - col.top;
-    a.compScrollMax = std::max(0.f, contentH - rh(col));
-    a.compScroll = clampf(a.compScroll, 0.f, a.compScrollMax);
-    if (a.compScrollMax > 1.f) {
-        float trackH = rh(col) - g.s(8.f);
-        float thumbH = std::max(g.s(28.f), trackH * (rh(col) / std::max(1.f, contentH)));
-        float t = a.compScroll / a.compScrollMax;
-        g.roundRect(rectOf(panel.right - g.s(6.f), col.top + g.s(4.f) + t * (trackH - thumbH),
-                           g.s(3.f), thumbH), g.s(1.5f), alpha(a.th.text, 0.30f));
-    }
+    sp.y = y;
+    panelEnd(a, sp);
 
     // The canvas is the preview, so the wait belongs on the canvas.
     if (a.compPending) {
@@ -2487,6 +2533,271 @@ static void drawCompressor(App& a) {
                     g.s(13.f), a.th.textDim, nowSec());
         a.requestAnim();
     }
+}
+
+// The same slot, a different job. Audio and video are converted rather than
+// compressed, and there is no preview to show - the canvas is still playing the
+// file - so the panel reports what the output will be instead.
+static void drawConverter(App& a) {
+    Gfx& g = a.gfx;
+    const auto& fs = mediaFormats();
+    if (fs.empty()) { a.compOpen = false; return; }
+    int fi = clampi(a.convFormat, 0, (int)fs.size() - 1);
+    const MediaFormat& fmt = fs[fi];
+    bool srcVideo = a.video.hasVideo();
+    bool busy = a.convRunning;
+
+    SidePanel sp = panelBegin(a, T(L"Конвертувати"));
+    if (!sp.ok) return;
+    D2D1_RECT_F col = sp.col;
+    float y = sp.y;
+    float rowH = g.s(22.f);
+
+    auto label = [&](const wchar_t* t) {
+        g.text(t, g.fCaption.Get(), rectOf(col.left, y, rw(col), rowH), a.th.textDim);
+        y += rowH;
+    };
+    auto sliderRow = [&](int uid, const wchar_t* name, const wstring& value, float v, float& out) {
+        g.text(name, g.fCaption.Get(), rectOf(col.left, y, rw(col) - g.s(96.f), rowH), a.th.textDim);
+        g.text(value, g.fCaption.Get(), rectOf(col.right - g.s(96.f), y, g.s(96.f), rowH),
+               a.th.text, DWRITE_TEXT_ALIGNMENT_TRAILING);
+        y += rowH;
+        bool dragging = slider(a, uid, rectOf(col.left, y + g.s(2.f), rw(col), g.s(14.f)),
+                               v, out, 1.f, 4.f);
+        y += g.s(26.f);
+        return dragging;
+    };
+
+    // ---------------- format
+    auto chips = [&](bool video, int uidBase) {
+        float gap = g.s(6.f);
+        int perRow = clampi((int)((rw(col) + gap) / (g.s(84.f) + gap)), 1, 3);
+        float cw = (rw(col) - gap * (perRow - 1)) / perRow, ch = g.s(30.f);
+        int n = 0;
+        for (size_t i = 0; i < fs.size(); ++i) {
+            if (fs[i].video != video) continue;
+            D2D1_RECT_F r = rectOf(col.left + (n % perRow) * (cw + gap),
+                                   y + (n / perRow) * (ch + gap), cw, ch);
+            bool sel = (int)i == fi;
+            if (textButton(a, uidBase + (int)i, CMD_NONE, r, fs[i].name, nullptr,
+                           { sel, !busy, false, false, 5.f }) && !sel) {
+                a.convFormat = (int)i;
+                a.convHasResult = false;
+                a.invalidate();
+            }
+            ++n;
+        }
+        if (n) y += ((n + perRow - 1) / perRow) * (ch + gap);
+        return n;
+    };
+
+    if (srcVideo) {
+        label(T(L"Відео"));
+        chips(true, UI_COMP_BASE + 100);
+        y += g.s(8.f);
+        label(T(L"Лише звук"));
+    } else {
+        label(T(L"Формат"));
+    }
+    chips(false, UI_COMP_BASE + 140);
+    y += g.s(12.f);
+
+    bool toVideo = fmt.video && srcVideo;
+
+    // Whether copying is even possible decides both the toggle's usefulness and
+    // the size we predict, so work it out once per file and format.
+    wstring curPath = a.currentPath();
+    if (a.convProbePath != curPath || a.convProbeFormat != fi) {
+        a.convProbePath = curPath;
+        a.convProbeFormat = fi;
+        a.convCanCopy = mediaCanCopy(curPath, fi);
+        mediaSourceAudio(curPath, a.convSrcChannels, a.convSrcRate, a.convSrcKbps);
+        a.convHasResult = false;         // that number was about another format
+        WIN32_FILE_ATTRIBUTE_DATA fa{};
+        a.convSrcBytes = GetFileAttributesExW(curPath.c_str(), GetFileExInfoStandard, &fa)
+                       ? (((uint64_t)fa.nFileSizeHigh << 32) | fa.nFileSizeLow) : 0;
+    }
+    // The default video bitrate is the source's own, which is only knowable
+    // once the engine has read its duration.
+    if (a.convVideoKbps <= 0 && a.mediaDuration() > 0.5 && a.convSrcBytes > 0) {
+        int srcKbps = (int)(a.convSrcBytes * 8.0 / a.mediaDuration() / 1000.0);
+        a.convVideoKbps = clampi(srcKbps - a.convAudioKbps, 300, 40000);
+    }
+    bool copying = a.convCopy && a.convCanCopy && a.convScale > 0.999f;
+
+    // ---------------- copying beats encoding whenever the container allows it
+    if (a.convCanCopy && a.convScale > 0.999f) {
+        D2D1_RECT_F tr = rectOf(col.left, y, rw(col), g.s(30.f));
+        g.text(T(L"Без перекодування"), g.fCaption.Get(),
+               rectOf(tr.left, tr.top, rw(tr) - g.s(52.f), rh(tr)), a.th.textDim);
+        if (toggleSwitch(a, UI_COMP_BASE + 180, tr, a.convCopy) && !busy) {
+            a.convCopy = !a.convCopy;
+            a.convHasResult = false;
+            a.invalidate();
+        }
+        y += g.s(30.f);
+        float hh = g.textWrap(T(L"Копіює доріжки, якщо контейнер їх прийме: миттєво і без втрат."),
+                              g.fSmall.Get(), rectOf(col.left, y, rw(col), g.s(56.f)),
+                              a.th.textMute).height;
+        y += hh + g.s(12.f);
+    }
+
+    // ---------------- picture
+    if (toVideo) {
+        // 0.3 .. 20 Mbit/s on a curve: the low end is where the choice matters.
+        const double maxKbps = 20000.0;
+        int cur = a.convVideoKbps > 0 ? a.convVideoKbps : 4000;
+        float v = (float)pow(clampf((float)(cur / maxKbps), 0.f, 1.f), 1.0 / 2.0), out = v;
+        wchar_t b[32];
+        if (cur >= 1000) swprintf(b, 32, T(L"%.1f Мбіт/с"), cur / 1000.0);
+        else             swprintf(b, 32, T(L"%d кбіт/с"), cur);
+        if (sliderRow(UI_COMP_BASE + 190, T(L"Якість відео"), b, v, out)) {
+            a.convVideoKbps = clampi((int)lround(pow((double)out, 2.0) * maxKbps), 300, 40000);
+            a.convHasResult = false;
+            a.invalidate();
+        }
+
+        int sw = a.video.width(), sh = a.video.height();
+        float v2 = (a.convScale - 0.25f) / 0.75f, out2 = v2;
+        wchar_t b2[40];
+        int ow = (int)std::max(16.0, floor(sw * a.convScale / 2.0) * 2.0);
+        int oh = (int)std::max(16.0, floor(sh * a.convScale / 2.0) * 2.0);
+        swprintf(b2, 40, L"%d×%d", ow, oh);
+        if (sliderRow(UI_COMP_BASE + 191, T(L"Роздільність"), b2, v2, out2)) {
+            a.convScale = clampf(0.25f + out2 * 0.75f, 0.25f, 1.f);
+            a.convHasResult = false;
+            a.invalidate();
+        }
+    }
+
+    // ---------------- sound
+    if (fmt.bitrate) {
+        const int steps[] = { 64, 96, 128, 160, 192, 224, 256, 320 };
+        const int N = (int)(sizeof(steps) / sizeof(steps[0]));
+        int idx = 0;
+        for (int i = 0; i < N; ++i) if (steps[i] <= a.convAudioKbps) idx = i;
+        float v = idx / (float)(N - 1), out = v;
+        wchar_t b[32];
+        swprintf(b, 32, T(L"%d кбіт/с"), steps[idx]);
+        if (sliderRow(UI_COMP_BASE + 192, T(L"Якість звуку"), b, v, out)) {
+            a.convAudioKbps = steps[clampi((int)lround(out * (N - 1)), 0, N - 1)];
+            a.convHasResult = false;
+            a.invalidate();
+        }
+    } else {
+        g.text(T(L"Формат без втрат — бітрейт не регулюється"), g.fSmall.Get(),
+               rectOf(col.left, y, rw(col), rowH * 2), a.th.textMute);
+        y += rowH + g.s(8.f);
+    }
+
+    // ---------------- numbers
+    y += g.s(2.f);
+    g.dc->FillRectangle(rectOf(col.left, y, rw(col), g.s(1.f)), g.solid(a.th.stroke));
+    y += g.s(10.f);
+
+    auto statRow = [&](const wchar_t* k, const wstring& v, const D2D1_COLOR_F& c) {
+        g.text(k, g.fCaption.Get(), rectOf(col.left, y, rw(col) * .45f, rowH), a.th.textMute);
+        g.text(v, g.fBodyStrong.Get(), rectOf(col.left + rw(col) * .3f, y, rw(col) * .7f, rowH),
+               c, DWRITE_TEXT_ALIGNMENT_TRAILING);
+        y += rowH + g.s(2.f);
+    };
+
+    double dur = a.mediaDuration();
+    {
+        wstring was = compSizeText((double)a.convSrcBytes);
+        if (dur > 0) was += L" · " + formatTime(dur);
+        statRow(T(L"Було"), was, a.th.textDim);
+    }
+    if (copying && toVideo) {
+        statRow(T(L"Стане"), T(L"як в оригіналі"), a.th.textDim);
+    } else if (copying && dur > 0 && a.convSrcKbps > 0) {
+        statRow(T(L"Стане"), L"≈ " + compSizeText(a.convSrcKbps * 1000.0 / 8.0 * dur), a.th.text);
+    } else if (copying) {
+        statRow(T(L"Стане"), T(L"без перекодування"), a.th.textDim);
+    } else if (dur > 0) {
+        double kbps = (double)a.convAudioKbps + (toVideo ? a.convVideoKbps : 0);
+        if (!fmt.bitrate) {
+            // Uncompressed: exactly what the source's own rate and channels cost.
+            // Lossless compression is worth roughly 40% of that on real music,
+            // which is a guess, but a far better one than the raw size.
+            int ch = a.convSrcChannels > 0 ? a.convSrcChannels : 2;
+            int rate = a.convSrcRate > 0 ? a.convSrcRate : 44100;
+            kbps = rate * ch * 16 / 1000.0;
+            if (fmt.ext == L".flac") kbps *= 0.6;
+        }
+        statRow(T(L"Стане"), L"≈ " + compSizeText(kbps * 1000.0 / 8.0 * dur), a.th.text);
+    }
+
+    if (a.convHasResult && a.convRes.ok) {
+        const ConvertResult& r = a.convRes;
+        wstring made = compSizeText((double)r.outBytes);
+        if (r.ms >= 950) {
+            wchar_t b[32];
+            swprintf(b, 32, T(L" · за %.0f с"), r.ms / 1000.0);
+            made += b;
+        }
+        statRow(T(L"Стало"), made, a.th.accent);
+        if (r.copied) {
+            g.text(T(L"Доріжки скопійовано без перекодування"), g.fSmall.Get(),
+                   rectOf(col.left, y, rw(col), rowH), a.th.textMute);
+            y += rowH;
+        }
+    } else if (!a.convStatus.empty() && !busy) {
+        g.text(a.convStatus, g.fSmall.Get(), rectOf(col.left, y, rw(col), rowH * 2), a.th.danger);
+        y += rowH;
+    }
+    y += g.s(8.f);
+
+    // ---------------- actions
+    {
+        float bh = g.s(34.f);
+        if (busy) {
+            float frac = a.convBatchTotal > 1
+                       ? (a.convBatchDone + a.conv.progress()) / (float)a.convBatchTotal
+                       : a.conv.progress();
+            frac = clampf(frac, 0.f, 1.f);
+            D2D1_RECT_F pr = rectOf(col.left, y + g.s(14.f), rw(col) - g.s(150.f), g.s(6.f));
+            g.roundRect(pr, g.s(3.f), alpha(a.th.text, 0.2f));
+            g.roundRect(rectOf(pr.left, pr.top, rw(pr) * frac, rh(pr)), g.s(3.f), a.th.accent);
+            wchar_t b[48];
+            if (a.convBatchTotal > 1)
+                swprintf(b, 48, L"%d/%d  %d%%", a.convBatchDone + 1, a.convBatchTotal,
+                         (int)lround(frac * 100));
+            else
+                swprintf(b, 48, L"%d%%", (int)lround(frac * 100));
+            g.text(b, g.fCaption.Get(), rectOf(col.left, y, rw(col) - g.s(96.f), bh),
+                   a.th.textDim, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            textButton(a, UI_COMP_BASE + 203, CMD_CONV_CANCEL,
+                       rectOf(col.right - g.s(86.f), y, g.s(86.f), bh),
+                       T(L"Скасувати"), nullptr, { false, true, true, false, 5.f });
+            a.requestAnim();
+            y += bh + g.s(12.f);
+        } else {
+            float half = (rw(col) - g.s(8.f)) * .5f;
+            textButton(a, UI_COMP_BASE + 200, CMD_CONV_SAVE, rectOf(col.left, y, half, bh),
+                       T(L"Конвертувати"), nullptr, { false, true, false, true, 5.f });
+            textButton(a, UI_COMP_BASE + 201, CMD_CONV_SAVEAS,
+                       rectOf(col.left + half + g.s(8.f), y, half, bh),
+                       T(L"Зберегти як…"), nullptr, { false, true, false, false, 5.f });
+            y += bh + g.s(8.f);
+
+            size_t n = 0;
+            for (size_t i = 0; i < a.folder.count(); ++i) {
+                wstring nm = a.folder.at((int)i).name;
+                if (!isMediaPath(nm)) continue;
+                if (fmt.video && !isVideoPath(nm)) continue;
+                ++n;
+            }
+            textButton(a, UI_COMP_BASE + 202, CMD_CONV_BATCH, rectOf(col.left, y, rw(col), bh),
+                       T(L"Уся папка…") + (n ? (L"  (" + std::to_wstring(n) + L")") : L""),
+                       T(L"Конвертувати всі файли папки в іншу теку"),
+                       { false, n > 0, false, false, 5.f });
+            y += bh + g.s(12.f);
+        }
+    }
+
+    sp.y = y;
+    panelEnd(a, sp);
 }
 
 static void drawSettings(App& a) {
@@ -2876,6 +3187,7 @@ static void drawHelp(App& a) {
         { L"↑  ↓",              T(L"Гучність") },
         { L"M",                 T(L"Вимкнути / увімкнути звук") },
         { L"S",                 T(L"Швидкість відтворення") },
+        { L"Ctrl+E",            T(L"Конвертувати в інший формат") },
         { L"A",                 T(L"Автопідгонка вікна та масштабу") },
         { L"PgUp  PgDn",        T(L"Попередній / наступний файл") },
         { T(L"Подвійний клік"),    T(L"Повний екран") },

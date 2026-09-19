@@ -219,6 +219,26 @@ struct App {
     float        compScroll = 0, compScrollMax = 0;
     float        compAnim = 0.f;          // 0 closed, 1 fully slid in
 
+    // ---- media converter (the same slot as the compressor, for audio/video)
+    MediaConverter conv;
+    int      convFormat = 0;
+    int      convAudioKbps = 192;
+    int      convVideoKbps = 0;       // 0 = follow the source
+    float    convScale = 1.f;
+    bool     convCopy = true;         // copy the streams when the container takes them
+    int      convBatchDone = 0, convBatchTotal = 0;
+    bool     convRunning = false;
+    bool     convHasResult = false;
+    ConvertResult convRes;
+    wstring  convStatus;
+    wstring  convOutDir;
+    double   convStartedAt = 0;
+    wstring  convProbePath;           // what convCanCopy was worked out for
+    int      convProbeFormat = -1;
+    bool     convCanCopy = false;
+    int      convSrcChannels = 0, convSrcRate = 0, convSrcKbps = 0;
+    uint64_t convSrcBytes = 0;
+
     wstring   audioTagsPath;         // whose tags audioTags holds
     AudioTags audioTags;
     wstring   coverUpgraded;         // cover art already re-fetched at full size
@@ -281,6 +301,13 @@ struct App {
     void cropReset();
     bool cropSize(int& w, int& h) const;   // the picture as cropped
     void openCompressor(bool on);
+    bool convertMode() const { return compOpen && videoMode; }
+    void convertReset();              // aim the panel at the current file
+    ConvertJob convertJob(const wstring& path, const wstring& outPath) const;
+    wstring convertOutPath(const wstring& src, const wstring& dir) const;
+    void convertSave(bool askWhere);
+    void convertBatch();
+    double mediaDuration() const;     // of the open file, seconds
     void compressRequest(bool now = false);
     CompressJob compressJob(const wstring& path, const wstring& outPath) const;
     wstring compressOutPath(const wstring& src, const wstring& dir) const;

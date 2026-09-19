@@ -47,6 +47,7 @@ using std::wstring;
 #define WM_PG_ANIM      (WM_APP + 3)
 #define WM_PG_VIDEO     (WM_APP + 4)   // media engine event
 #define WM_PG_COMPRESS  (WM_APP + 5)   // a compress/convert job finished
+#define WM_PG_CONVERT   (WM_APP + 6)   // a media conversion finished
 
 // ---------------------------------------------------------------- language
 enum { LANG_UK = 0, LANG_EN = 1, LANG_RU = 2 };
@@ -222,6 +223,67 @@ public:
     bool pop(CompressResult& out);
     bool busy() const;
     void cancelBatch();
+
+private:
+    Impl* p_ = nullptr;
+};
+
+// ---------------------------------------------------------------- converting
+// Media formats this machine can write. Probed once: the encoders that exist
+// depend on the edition of Windows and on whatever codec packs are installed.
+struct MediaFormat {
+    wstring ext;              // ".mp3"
+    wstring name;             // "MP3"
+    bool    video = false;    // carries a picture as well as sound
+    GUID    container{};      // MFTranscodeContainerType_*
+    GUID    audio{};          // MFAudioFormat_*
+    GUID    vcodec{};         // MFVideoFormat_*, unused when video is false
+    bool    bitrate = true;   // a bitrate setting means something
+};
+const std::vector<MediaFormat>& mediaFormats();
+int mediaFormatFor(const wstring& ext, bool wantVideo);
+// Whether this file's streams could go into that format untouched. A guess
+// from what the shell knows, good enough to put a number on screen; the real
+// answer is whether the copy attempt succeeds.
+bool mediaCanCopy(const wstring& path, int format);
+void mediaSourceAudio(const wstring& path, int& channels, int& sampleRate, int& kbps);
+
+struct ConvertJob {
+    uint64_t id = 0;
+    wstring  path, outPath;
+    int      format = 0;          // index into mediaFormats()
+    int      audioKbps = 192;
+    int      videoKbps = 4000;
+    float    scale = 1.f;         // output frame size, 0.25..1 of the original
+    bool     copyStreams = true;  // remux instead of re-encoding when possible
+    int      batchIndex = 0, batchTotal = 0;
+};
+
+struct ConvertResult {
+    uint64_t id = 0;
+    bool     ok = false, saved = false;
+    bool     copied = false;      // streams were copied, nothing re-encoded
+    wstring  error, path, outPath;
+    uint64_t srcBytes = 0, outBytes = 0;
+    double   seconds = 0;         // duration of the media
+    double   ms = 0;              // how long the conversion took
+    int      batchIndex = 0, batchTotal = 0;
+};
+
+// One worker thread and a queue. Conversions are never dropped or coalesced:
+// every one of them is a file the user asked for.
+class MediaConverter {
+public:
+    struct Impl;
+    ~MediaConverter();
+    void  start(HWND notify);
+    void  stop();
+    void  submit(ConvertJob job);
+    bool  pop(ConvertResult& out);
+    bool  busy() const;
+    float progress() const;       // 0..1 through the running job
+    int   queued() const;
+    void  cancel();
 
 private:
     Impl* p_ = nullptr;
@@ -424,6 +486,10 @@ struct Gfx {
               DWRITE_TEXT_ALIGNMENT ta = DWRITE_TEXT_ALIGNMENT_LEADING,
               DWRITE_PARAGRAPH_ALIGNMENT pa = DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     D2D1_SIZE_F measure(const wstring& s, IDWriteTextFormat* f, float maxW = 4000.f);
+    // A hint that may run onto a second line. Every format is created with
+    // wrapping off, because nearly every label in the app is one line.
+    D2D1_SIZE_F textWrap(const wstring& s, IDWriteTextFormat* f, D2D1_RECT_F r,
+                         const D2D1_COLOR_F& c);
     void roundRect(D2D1_RECT_F r, float radius, const D2D1_COLOR_F& fill);
     void pushRoundClip(D2D1_RECT_F r, float radius);
     void popRoundClip();
@@ -504,5 +570,6 @@ enum {
     CMD_ASSOC_CLEAR, CMD_ASSOC_WINDOWS, CMD_ASSOC_POPULAR, CMD_PIN,
     CMD_ESCAPE, CMD_PRINT, CMD_HELP, CMD_ROTATE_SAVE,
     CMD_COMPRESS, CMD_COMP_SAVE, CMD_COMP_SAVEAS, CMD_COMP_BATCH, CMD_COMP_CANCEL,
-    CMD_CROP, CMD_CROP_APPLY, CMD_CROP_CANCEL, CMD_CROP_RESET
+    CMD_CROP, CMD_CROP_APPLY, CMD_CROP_CANCEL, CMD_CROP_RESET,
+    CMD_CONV_SAVE, CMD_CONV_SAVEAS, CMD_CONV_BATCH, CMD_CONV_CANCEL
 };

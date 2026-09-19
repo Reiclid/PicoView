@@ -293,7 +293,10 @@ void App::autoSizeWindow() {
 
     UINT dpi = gfx.dpi ? gfx.dpi : 96;
     int titleH = titleOverlay() ? 0 : (int)lround(40.0 * dpi / 96.0);
+    // Whatever is docked to the right edge is part of the window too, or the
+    // picture would be squeezed by exactly the width of the panel.
     int infoW = cfg.infoPanel ? (int)lround(320.0 * dpi / 96.0) : 0;
+    if (compOpen) infoW += (int)lround(340.0 * dpi / 96.0);
     int fx = GetSystemMetricsForDpi(SM_CXFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
     int fy = GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
 
@@ -311,8 +314,10 @@ void App::autoSizeWindow() {
 
     int winW = (int)lround(sw * k) + infoW + fx * 2;
     int winH = (int)lround(sh * k) + titleH + fy;
+    int minH = compOpen ? (int)lround(620.0 * dpi / 96.0) : 320;
     winW = clampi(winW, 420, mi.rcWork.right - mi.rcWork.left);
-    winH = clampi(winH, 320, mi.rcWork.bottom - mi.rcWork.top);
+    winH = clampi(winH, std::min(minH, (int)(mi.rcWork.bottom - mi.rcWork.top)),
+                  mi.rcWork.bottom - mi.rcWork.top);
 
     RECT wr{};
     GetWindowRect(hwnd, &wr);
@@ -465,15 +470,14 @@ void App::goTo(int newIndex, bool resetView) {
         if (vs != viewStates.end()) { pendingView = vs->second; hasPendingView = true; }
     }
 
-    if (compOpen) {
-        // Videos are not ours to compress; anything else gets a fresh preview.
-        if (isMediaPath(p)) openCompressor(false);
-        else                compressRequest(true);
-    }
+    if (compOpen && !isMediaPath(p)) compressRequest(true);
 
     if (isMediaPath(p)) {
         leaveVideo();
         openVideo(p);
+        // The panel follows whatever is on screen: the next file converts with
+        // its own defaults rather than the previous one's.
+        if (compOpen) convertReset();
         preload();
         trimCaches();
         invalidate();
@@ -898,9 +902,29 @@ void App::cropReset() {
 
 // ------------------------------------------------------------- compressor
 void App::openCompressor(bool on) {
+    if (on && videoMode && !currentPath().empty()) {
+        // The same slot, a different job: media is converted, not compressed.
+        if (mediaFormats().empty()) {
+            showToast(T(L"Немає доступних кодувальників"), 2.5);
+            return;
+        }
+        convertReset();
+        convBatchDone = convBatchTotal = 0;
+        convRunning = false;
+        conv.start(hwnd);
+        compOpen = true;
+        compScroll = 0;
+        cfg.infoPanel = false;
+        needRelayout = true;
+        settingsOpen = false;
+        moreMenuOpen = false;
+        showHelp = false;
+        invalidate();
+        return;
+    }
     if (on) {
         auto pic = current();
-        if (videoMode || currentPath().empty() || !pic || pic->failed) {
+        if (currentPath().empty() || !pic || pic->failed) {
             showToast(T(L"Стиснути можна лише зображення"));
             return;
         }
@@ -930,6 +954,8 @@ void App::openCompressor(bool on) {
         comp.cancelBatch();
         compBmp.Reset();
         compHasResult = false;
+        // A conversion is a file the user asked for; it keeps running and says
+        // so when it lands.
     }
     invalidate();
 }
@@ -1052,6 +1078,180 @@ void App::compressBatch() {
     }
     requestAnim();
     invalidate();
+}
+
+// ------------------------------------------------------------------ converting
+double App::mediaDuration() const {
+    return videoMode ? video.duration() : 0.0;
+}
+
+// Start from what the file already is, so "just change the container" is the
+// default and converting away from it is a deliberate choice.
+void App::convertReset() {
+    const auto& fs = mediaFormats();
+    wstring p = currentPath();
+    if (fs.empty() || p.empty()) return;
+    int f = mediaFormatFor(extOf(p), isVideoPath(p));
+    convFormat = clampi(f >= 0 ? f : 0, 0, (int)fs.size() - 1);
+    convScale = 1.f;
+    convVideoKbps = 0;               // 0: work it out from the source, once its
+    convHasResult = false;           // duration is known
+    convStatus.clear();
+    convProbeFormat = -1;
+    convProbePath.clear();
+}
+
+ConvertJob App::convertJob(const wstring& path, const wstring& outPath) const {
+    ConvertJob j;
+    j.path = path;
+    j.outPath = outPath;
+    j.format = convFormat;
+    j.audioKbps = convAudioKbps;
+    j.videoKbps = convVideoKbps > 0 ? convVideoKbps : 4000;
+    j.scale = convScale;
+    // Copying only makes sense when nothing is being asked of the picture.
+    j.copyStreams = convCopy && convScale > 0.999f;
+    return j;
+}
+
+wstring App::convertOutPath(const wstring& src, const wstring& dir) const {
+    const auto& fs = mediaFormats();
+    if (fs.empty()) return L"";
+    wstring ext = fs[clampi(convFormat, 0, (int)fs.size() - 1)].ext;
+    wstring folder = dir.empty() ? dirOf(src) : dir;
+    wstring stem = stemOf(src);
+    // Converting to a different format already renames the file; only a
+    // same-format pass needs a word to keep it apart from the original.
+    bool same = lowerOf(extOf(src)) == ext;
+    for (int n = 0; n < 1000; ++n) {
+        wstring name = stem + (same ? T(L" (конвертовано)") : L"");
+        if (n > 0) name += L" " + std::to_wstring(n);
+        wstring p = joinPath(folder, name + ext);
+        if (!fileExists(p)) return p;
+    }
+    return joinPath(folder, stem + ext);
+}
+
+void App::convertSave(bool askWhere) {
+    wstring src = currentPath();
+    const auto& fs = mediaFormats();
+    if (src.empty() || fs.empty()) return;
+    const MediaFormat& f = fs[clampi(convFormat, 0, (int)fs.size() - 1)];
+
+    wstring out = convertOutPath(src, L"");
+    if (askWhere) {
+        wchar_t buf[MAX_PATH * 2] = {};
+        wcsncpy(buf, fileNameOf(out).c_str(), MAX_PATH * 2 - 1);
+        wstring filter = f.name + L" (*" + f.ext + L")|*" + f.ext + L"|";
+        for (auto& c : filter) if (c == L'|') c = L'\0';
+        filter += L'\0';
+        wstring dir = dirOf(out);
+
+        OPENFILENAMEW ofn{};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = hwnd;
+        ofn.lpstrFilter = filter.c_str();
+        ofn.lpstrFile = buf;
+        ofn.nMaxFile = MAX_PATH * 2;
+        ofn.lpstrDefExt = f.ext.c_str() + 1;
+        ofn.lpstrInitialDir = dir.c_str();
+        ofn.Flags = OFN_OVERWRITEPROMPT | OFN_EXPLORER | OFN_NOCHANGEDIR;
+        if (!GetSaveFileNameW(&ofn)) return;
+        out = buf;
+    }
+
+    convBatchTotal = 1;
+    convBatchDone = 0;
+    convHasResult = false;
+    convRunning = true;
+    convStartedAt = nowSec();
+    convStatus = T(L"Конвертування…");
+    conv.start(hwnd);
+    conv.submit(convertJob(src, out));
+    requestAnim();
+    invalidate();
+}
+
+void App::convertBatch() {
+    if (folder.count() == 0) return;
+
+    ComPtr<IFileOpenDialog> dlg;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg)))) return;
+    DWORD opts = 0;
+    dlg->GetOptions(&opts);
+    dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+    if (FAILED(dlg->Show(hwnd))) return;
+    ComPtr<IShellItem> item;
+    if (FAILED(dlg->GetResult(&item))) return;
+    PWSTR raw = nullptr;
+    if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &raw)) || !raw) return;
+    convOutDir = raw;
+    CoTaskMemFree(raw);
+
+    const auto& fs = mediaFormats();
+    if (fs.empty()) return;
+    bool wantVideo = fs[clampi(convFormat, 0, (int)fs.size() - 1)].video;
+
+    // Sound can be pulled out of a video, but a picture cannot be put into one
+    // that never had it, so a video target only takes video sources.
+    std::vector<wstring> list;
+    for (size_t i = 0; i < folder.count(); ++i) {
+        wstring p = joinPath(folder.dir(), folder.at((int)i).name);
+        if (!isMediaPath(p)) continue;
+        if (wantVideo && !isVideoPath(p)) continue;
+        list.push_back(p);
+    }
+    if (list.empty()) { showToast(T(L"У папці немає відповідних файлів")); return; }
+
+    convBatchTotal = (int)list.size();
+    convBatchDone = 0;
+    convRunning = true;
+    convStartedAt = nowSec();
+    convStatus = T(L"Обробка папки…");
+    conv.start(hwnd);
+    for (size_t i = 0; i < list.size(); ++i) {
+        ConvertJob j = convertJob(list[i], convertOutPath(list[i], convOutDir));
+        j.batchIndex = (int)i + 1;
+        j.batchTotal = (int)list.size();
+        conv.submit(std::move(j));
+    }
+    requestAnim();
+    invalidate();
+}
+
+// Drain whatever the converter finished.
+static void pumpConverter(App& a) {
+    ConvertResult r;
+    bool changed = false;
+    while (a.conv.pop(r)) {
+        changed = true;
+        a.convRes = r;
+        a.convHasResult = r.ok;
+        a.convBatchDone++;
+        pgLog("convert: %.0f ms  %ls -> %ls  %llu -> %llu bytes%s%ls",
+              r.ms, fileNameOf(r.path).c_str(), fileNameOf(r.outPath).c_str(),
+              (unsigned long long)r.srcBytes, (unsigned long long)r.outBytes,
+              r.copied ? "  (copied)" : "  (encoded)", r.error.c_str());
+
+        if (a.convBatchDone >= a.convBatchTotal) {
+            a.convRunning = false;
+            a.convStatus.clear();
+            // A file that landed in the folder on screen belongs in the listing.
+            if (r.ok && !a.folder.dir().empty() &&
+                lowerOf(dirOf(r.outPath)) == lowerOf(a.folder.dir()))
+                a.scanFolderNow(a.folder.dir(), a.currentPath());
+            if (a.convBatchTotal > 1)
+                a.showToast(T(L"Конвертовано файлів: ") + std::to_wstring(a.convBatchDone), 2.6);
+            else
+                a.showToast(r.ok ? (T(L"Збережено: ") + fileNameOf(r.outPath))
+                                 : (r.error.empty() ? T(L"Не вдалося конвертувати") : r.error), 3.0);
+        } else {
+            a.convStatus = T(L"Обробка папки…") + (L"  " + std::to_wstring(a.convBatchDone) +
+                           L"/" + std::to_wstring(a.convBatchTotal));
+        }
+        if (!r.ok && !r.error.empty()) a.convStatus = r.error;
+    }
+    if (changed) a.invalidate();
 }
 
 // Drain whatever the worker finished.
@@ -1535,6 +1735,15 @@ void uiOnCommand(App& a, int cmd) {
         case CMD_COMP_SAVE:    a.compressSave(false); break;
         case CMD_COMP_SAVEAS:  a.compressSave(true); break;
         case CMD_COMP_BATCH:   a.compressBatch(); break;
+        case CMD_CONV_SAVE:    a.convertSave(false); break;
+        case CMD_CONV_SAVEAS:  a.convertSave(true); break;
+        case CMD_CONV_BATCH:   a.convertBatch(); break;
+        case CMD_CONV_CANCEL:
+            a.conv.cancel();
+            a.convRunning = false;
+            a.convStatus.clear();
+            a.showToast(T(L"Скасовано"));
+            break;
         case CMD_COMP_CANCEL:  a.comp.cancelBatch(); a.compStatus.clear(); a.invalidate(); break;
 
         case CMD_HELP: a.showHelp = !a.showHelp; a.invalidate(); break;
@@ -1657,6 +1866,7 @@ static void stepAnimations(App& a, double dt) {
 
     // Playback needs a steady stream of repaints to pull frames.
     if (a.videoMode && a.video.playing()) a.requestAnim();
+    if (a.convRunning) a.requestAnim();          // the progress bar is moving
 
     double idle = nowSec() - a.lastMouseMove;
     bool keepBar = a.cfg.barHideMs < 0;           // the overlays never fade
@@ -2005,6 +2215,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         case WM_PG_COMPRESS: pumpCompressor(a); return 0;
+        case WM_PG_CONVERT:  pumpConverter(a); return 0;
 
         case WM_CHAR:
             if (a.editField) {

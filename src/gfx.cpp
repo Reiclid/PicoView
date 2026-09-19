@@ -282,6 +282,20 @@ D2D1_SIZE_F Gfx::measure(const wstring& str, IDWriteTextFormat* f, float maxW) {
     return out;
 }
 
+D2D1_SIZE_F Gfx::textWrap(const wstring& str, IDWriteTextFormat* f, D2D1_RECT_F r,
+                          const D2D1_COLOR_F& c) {
+    D2D1_SIZE_F out{ 0, 0 };
+    if (!f || str.empty() || !dw) return out;
+    f->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+    f->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    f->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+    out = measure(str, f, r.right - r.left);
+    dc->DrawTextW(str.c_str(), (UINT32)str.size(), f, r, solid(c),
+                  D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+    f->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    return out;
+}
+
 void Gfx::roundRect(D2D1_RECT_F r, float radius, const D2D1_COLOR_F& fill) {
     if (fill.a <= 0.001f) return;
     if (radius <= 0.5f) { dc->FillRectangle(r, solid(fill)); return; }
