@@ -1916,6 +1916,27 @@ static void render(App& a) {
     stepAnimations(a, dt);
     a.clampPan();
 
+    // The generated cover is a three-dimensional object, rendered off-screen
+    // before Direct2D opens its frame: the two share one device and cannot be
+    // interleaved inside a frame. The interface then draws the result like any
+    // other bitmap. What size to render is whatever the sleeve asked for last
+    // frame, which is exact except for the frame you resize the window on.
+    a.blobBmp = nullptr;
+    if (a.blobWant > 0 && a.gfx.d3d && a.gfx.dc) {
+        if (!a.blobInit || a.blobDevice != a.gfx.d3d.Get()) {
+            a.blobInit = true;
+            a.blobDevice = a.gfx.d3d.Get();
+            a.blob.init(a.gfx.d3d.Get(), a.gfx.d3dCtx.Get(), a.gfx.dc.Get());
+        }
+        if (a.blob.ready())
+            a.blobBmp = a.blob.frame(a.cover.plan, a.blobWant, (float)a.coverTime,
+                                     a.coverPulse, a.coverLevel);
+    }
+    // The sleeve asks again every frame it is on screen. Clearing it here is
+    // what stops the object being rendered for a window that moved on to a
+    // photograph half an hour ago.
+    a.blobWant = 0;
+
     if (!a.gfx.begin()) return;
     uiFrame(a);
     a.gfx.end();

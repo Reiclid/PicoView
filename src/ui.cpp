@@ -933,8 +933,19 @@ static void drawAudioStage(App& a, D2D1_RECT_F cv) {
         float grow = 1.f + 0.014f * a.coverPulse;
         float pad = side * (grow - 1.f) * .5f;
         D2D1_RECT_F big = rectOf(art.left - pad, art.top - pad, side * grow, side * grow);
-        drawCoverArt(a, big, rad * grow, a.coverLevel, a.coverPulse, a.coverTime);
+        a.blobWant = (int)(side + 0.5f);          // what to render for the next frame
+        if (a.blobBmp) {
+            g.pushRoundClip(big, rad * grow);
+            g.dc->DrawBitmap(a.blobBmp, big, 1.f, D2D1_INTERPOLATION_MODE_LINEAR);
+            g.popRoundClip();
+        } else {
+            // No object: old hardware, or the very first frame. The flat
+            // version of the same plan stands in for it.
+            drawCoverArt(a, big, rad * grow, a.coverLevel, a.coverPulse, a.coverTime);
+        }
         if (playing || fabsf(a.coverPulse - bass) > 0.01f) a.requestAnim();
+    } else {
+        a.blobWant = 0;
     }
     if (haveArt) {
         float bw = (float)tb->w, bh = (float)tb->h;

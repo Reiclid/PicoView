@@ -52,6 +52,7 @@ void coverPlan(const wstring& path, CoverPlan& out) {
     // A family of neighbouring hues rather than a scatter: the colours have to
     // read as one glowing thing, the way a flame goes red to orange to yellow.
     float h0 = r.f();
+    out.hue = h0;
     float step = r.f(0.06f, 0.15f) * (r.i(2) ? 1.f : -1.f);
     int n = 5 + r.i(3);
     out.rot = r.f(-0.22f, 0.22f);
@@ -77,6 +78,7 @@ void coverPlan(const wstring& path, CoverPlan& out) {
         b.aspect = core ? r.f(1.f, 1.15f) : r.f(1.25f, 2.1f);
         b.lean = ang;
         b.alpha = core ? 1.f : 0.95f;
+        b.z = core ? r.f(-0.15f, 0.15f) : r.f(-0.65f, 0.65f);
         coverHsl(h0 + step * i + r.f(-0.02f, 0.02f), r.f(0.92f, 1.f), r.f(0.50f, 0.60f),
                  b.cr, b.cg, b.cb);
         out.lobes.push_back(b);

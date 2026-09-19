@@ -35,11 +35,17 @@ call "%VCVARS%" >nul || (echo [!] vcvars64 failed & exit /b 1)
 :have_env
 if not exist build mkdir build
 
-echo [1/2] resources
+echo [1/3] resources
 rc /nologo /fo build\app.res res\app.rc || exit /b 1
 
-echo [2/2] compiling
-set CFLAGS=/nologo /std:c++17 /utf-8 /permissive- /Zc:__cplusplus /W3 /MP /EHsc /DUNICODE /D_UNICODE /O2 /Oi /Gy /DNDEBUG /MT
+echo [2/3] shaders
+rem  Compiled at build time, not at run time: D3DCompile would drag in
+rem  d3dcompiler_47.dll and the point of this program is one file.
+fxc /nologo /T vs_4_0 /E VSMain /O3 /Fh build\blob_vs.h /Vn kBlobVS src\blob.hlsl || exit /b 1
+fxc /nologo /T ps_4_0 /E PSMain /O3 /Fh build\blob_ps.h /Vn kBlobPS src\blob.hlsl || exit /b 1
+
+echo [3/3] compiling
+set CFLAGS=/nologo /std:c++17 /utf-8 /permissive- /Zc:__cplusplus /W3 /MP /EHsc /DUNICODE /D_UNICODE /O2 /Oi /Gy /DNDEBUG /MT /I build
 rem  mf.dll is only touched by the converter's worker thread, so it is delay
 rem  loaded: nothing about opening a picture should wait for it.
 set LFLAGS=/link /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /INCREMENTAL:NO /DELAYLOAD:mf.dll
@@ -49,7 +55,7 @@ set LIBS=user32.lib gdi32.lib shell32.lib shlwapi.lib ole32.lib oleaut32.lib uui
 
 cl %CFLAGS% /Fo:build\ /Fd:build\ src\main.cpp src\ui.cpp src\gfx.cpp src\decode.cpp ^
    src\loader.cpp src\util.cpp src\video.cpp src\lang.cpp src\encode.cpp ^
-   src\convert.cpp src\envelope.cpp src\coverart.cpp ^
+   src\convert.cpp src\envelope.cpp src\coverart.cpp src\blob.cpp ^
    build\app.res /Fe:PicoView.exe %LFLAGS% %LIBS% || exit /b 1
 
 echo.

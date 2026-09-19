@@ -251,6 +251,11 @@ struct App {
     uint64_t convSrcBytes = 0;
 
     AudioEnvelope envelope;          // loudness of the track over time
+    BlobRenderer  blob;              // the cover as a ray-marched object
+    bool          blobInit = false;
+    int           blobWant = 0;      // square size the sleeve asked for, px
+    ID2D1Bitmap1* blobBmp = nullptr; // this frame's render, owned by the renderer
+    void*         blobDevice = nullptr;
     CoverArt  cover;                 // generated artwork for a track with none
     float     coverPulse = 0;        // smoothed low end: fast attack, slow release
     float     coverLevel = 0;

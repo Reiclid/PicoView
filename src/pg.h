@@ -163,6 +163,7 @@ struct CoverLobe {
     float aspect = 1.f;            // >1 stretches the lobe into a petal
     float lean = 0;                // which way the petal points, radians
     float alpha = 1.f;
+    float z = 0;                   // -1..1, only the three-dimensional version
     float cr = 1, cg = 1, cb = 1;
 };
 
@@ -170,6 +171,7 @@ struct CoverPlan {
     std::vector<CoverLobe> lobes;
     float rot = 0;                 // how fast the whole cluster turns
     float spread = .18f;           // how far the lobes sit from the centre
+    float hue = 0;                 // where the family of hues starts
 };
 
 void  coverPlan(const wstring& path, CoverPlan& out);
@@ -177,6 +179,23 @@ void  coverHsl(float h, float sat, float l, float& r, float& g, float& b);
 float coverFalloff(float t);                  // 1 at the middle, 0 at the rim
 // The resting pose, rasterised for the thumbnail cache. Opaque BGRA, square.
 void  coverRaster(const wstring& path, int size, PixelBuf& out);
+
+// The same plan as a real object: spheres melted together, ray marched with a
+// frosted translucent material, turning and swelling with the music. Rendered
+// off-screen and handed to Direct2D as a bitmap, exactly like a video frame.
+class BlobRenderer {
+public:
+    struct Impl;
+    ~BlobRenderer();
+    bool init(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID2D1DeviceContext* d2d);
+    void shutdown();
+    bool ready() const;
+    // Returns the square to draw, or null when the object is unavailable.
+    ID2D1Bitmap1* frame(const CoverPlan& plan, int size, float time, float pulse, float level);
+
+private:
+    Impl* p_ = nullptr;
+};
 
 // ---------------------------------------------------------------- decoding
 void     decodeInit();
