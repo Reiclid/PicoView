@@ -165,6 +165,11 @@ struct CoverLobe {
     float alpha = 1.f;
     float z = 0;                   // -1..1, only the three-dimensional version
     float cr = 1, cg = 1, cb = 1;
+    // What this part of the object is, for the three-dimensional version.
+    // A pile of spheres always looks like a pile of spheres.
+    int   kind = 0;                // 0 sphere, 1 capsule, 2 ring, 3 rounded box
+    float bx = 0, by = 0, bz = 0;  // capsule reach, ring axis, or box extents
+    float param = 0.35f;           // secondary radius, as a share of the first
 };
 
 struct CoverPlan {
@@ -172,6 +177,8 @@ struct CoverPlan {
     float rot = 0;                 // how fast the whole cluster turns
     float spread = .18f;           // how far the lobes sit from the centre
     float hue = 0;                 // where the family of hues starts
+    float twist = 0;               // how much the whole body is wrung out
+    float mirror = 0;              // >0 folds it symmetrical about that plane
 };
 
 void  coverPlan(const wstring& path, CoverPlan& out);

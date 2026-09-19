@@ -926,18 +926,18 @@ static void drawAudioStage(App& a, D2D1_RECT_F cv) {
     a.coverLevel += (level - a.coverLevel) * easeK(a, 0.05f);
     if (playing) a.coverTime += a.frameDt;
 
-    shadowPill(g, art, rad, a.th.shadow, 0.85f);
+    if (haveArt) shadowPill(g, art, rad, a.th.shadow, 0.85f);
     if (artFade < 1.f) {
         if (a.cover.path != path || a.cover.device != g.dc.Get()) buildCover(a, path);
-        // The whole square swells a little on the beat.
+        // The whole thing swells a little on the beat.
         float grow = 1.f + 0.014f * a.coverPulse;
         float pad = side * (grow - 1.f) * .5f;
         D2D1_RECT_F big = rectOf(art.left - pad, art.top - pad, side * grow, side * grow);
         a.blobWant = (int)(side + 0.5f);          // what to render for the next frame
         if (a.blobBmp) {
-            g.pushRoundClip(big, rad * grow);
+            // No card, no clip, no border: the object is translucent and sits
+            // on the window itself.
             g.dc->DrawBitmap(a.blobBmp, big, 1.f, D2D1_INTERPOLATION_MODE_LINEAR);
-            g.popRoundClip();
         } else {
             // No object: old hardware, or the very first frame. The flat
             // version of the same plan stands in for it.
@@ -960,7 +960,7 @@ static void drawAudioStage(App& a, D2D1_RECT_F cv) {
     } else if (!noArt) {
         a.requestAnim();                     // the thumbnail is still on its way
     }
-    g.roundRectStroke(art, rad, alpha(a.th.text, 0.10f), g.s(1.f));
+    if (haveArt) g.roundRectStroke(art, rad, alpha(a.th.text, 0.10f), g.s(1.f));
 
     float y = art.bottom + g.s(20.f);
 

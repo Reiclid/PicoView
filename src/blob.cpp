@@ -13,13 +13,11 @@
 // Must match the cbuffer in blob.hlsl, 16-byte aligned.
 struct BlobConstants {
     float time[4];          // t, pulse, level, unused
-    float params[4];        // ball count, blend radius, seed, rotation speed
-    float light[4];         // w intensity
-    float lamp[3][4];       // the three lamps, rgb
-    float bg0[4];
-    float bg1[4];
-    float ball[8][4];       // xyz centre, w radius
-    float tint[8][4];
+    float params[4];        // shape count, blend radius, seed, rotation speed
+    float form[4];          // twist, mirror fold, step scale, unused
+    float mat[4];           // dispersion, frost, absorption, opacity
+    float shapeA[8][4];     // xyz centre, w radius
+    float shapeB[8][4];     // xyz reach / axis / extents, w kind + secondary radius
 };
 
 struct BlobRenderer::Impl {
@@ -104,9 +102,11 @@ static bool ensureTarget(BlobRenderer::Impl* p, int size) {
 
     ComPtr<IDXGISurface> surf;
     if (FAILED(p->tex.As(&surf))) return false;
+    // Premultiplied, because the object is translucent and there is nothing
+    // painted behind it: what shows through is the window itself.
     D2D1_BITMAP_PROPERTIES1 bp = D2D1::BitmapProperties1(
         D2D1_BITMAP_OPTIONS_NONE,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.f, 96.f);
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.f, 96.f);
     if (FAILED(p->d2d->CreateBitmapFromDxgiSurface(surf.Get(), &bp, &p->bmp))) return false;
 
     p->size = size;
@@ -126,44 +126,52 @@ ID2D1Bitmap1* BlobRenderer::frame(const CoverPlan& plan, int size, float time,
 
     int n = (int)std::min<size_t>(plan.lobes.size(), 8);
     c.params[0] = (float)n;
-    // The beat does not only move the lobes, it melts them together: the blend
-    // radius opens up on the kick, so the whole thing swells as one body.
-    c.params[1] = 0.23f + 0.20f * pulse;
+    // The beat does not only move the parts, it melts them together: the
+    // blend radius opens up on the kick, so the whole thing swells as one.
+    c.params[1] = 0.34f + 0.22f * pulse;
     c.params[2] = plan.spread * 37.0f;                // any stable per-track number
     c.params[3] = 0.32f + plan.rot * 0.9f;            // rotation speed and direction
 
-    c.light[3] = 1.25f + 0.60f * level;
+    c.form[0] = plan.twist;
+    c.form[1] = plan.mirror;
+    // Wringing or folding space stretches distances, so the march has to take
+    // shorter steps or it walks straight through the surface.
+    c.form[2] = (fabsf(plan.twist) > 0.01f || plan.mirror > 0.01f) ? 0.55f : 0.85f;
 
-    // Three lamps in contrasting colours around the track's own hue. The body
-    // is nearly colourless, so this is where all the colour comes from - and
-    // contrast between the lamps is what keeps it from looking monochrome.
-    static const float kOff[3] = { 0.f, 0.34f, -0.27f };
-    static const float kLum[3] = { 0.60f, 0.52f, 0.50f };
-    for (int k = 0; k < 3; ++k)
-        coverHsl(plan.hue + kOff[k], 0.95f, kLum[k],
-                 c.lamp[k][0], c.lamp[k][1], c.lamp[k][2]);
-
-    // The backdrop keeps the track's own colours, just very dark.
-    const CoverLobe& first = plan.lobes.empty() ? CoverLobe() : plan.lobes[0];
-    c.bg0[0] = first.cr * 0.10f; c.bg0[1] = first.cg * 0.10f; c.bg0[2] = first.cb * 0.12f;
-    c.bg1[0] = 0.012f; c.bg1[1] = 0.012f; c.bg1[2] = 0.018f;
+    c.mat[0] = 0.20f;                                // how far the channels part
+    c.mat[1] = 0.014f;                                // frost on the surface
+    c.mat[2] = 1.10f;                                 // absorption through thickness
+    c.mat[3] = 1.35f;                                 // overall opacity
 
     for (int i = 0; i < n; ++i) {
         const CoverLobe& b = plan.lobes[i];
-        // The plan is laid out in the unit square; the object lives in a cube
-        // around the origin, so the same numbers place it in three dimensions.
-        float ph = b.phase + time * b.speed * 0.55f;
-        float swell = 1.f + 0.30f * pulse * b.weight;
-        float ox = (b.x - .5f) * 2.5f;
-        float oy = (b.y - .5f) * 2.5f;
-        float oz = b.z * 1.5f;
-        c.ball[i][0] = (ox + b.dx * 2.2f * sinf(ph)) * swell;
-        c.ball[i][1] = (oy + b.dy * 2.2f * cosf(ph * 0.83f)) * swell;
-        c.ball[i][2] = oz * (1.f + 0.18f * sinf(ph * 0.7f));
-        c.ball[i][3] = b.r * 0.92f * (0.85f + 0.35f * pulse * b.weight);
-        c.tint[i][0] = b.cr;
-        c.tint[i][1] = b.cg;
-        c.tint[i][2] = b.cb;
+        // Every part travels its own path, at its own rate, on all three axes.
+        // They drift through each other and come apart again, which is the
+        // point of building the thing out of a field instead of a mesh.
+        float ph = b.phase + time * b.speed * 0.9f;
+        float swell = 1.f + 0.26f * pulse * b.weight;
+        float amp = 0.20f + 0.26f * b.weight;
+        float ox = (b.x - .5f) * 1.25f + amp * sinf(ph * 0.83f + b.bx * 3.1f);
+        float oy = (b.y - .5f) * 1.25f + amp * sinf(ph * 0.61f + b.by * 3.1f);
+        float oz = b.z * 0.85f + amp * 0.8f * cosf(ph * 0.47f + b.bz * 3.1f);
+        c.shapeA[i][0] = ox * swell;
+        c.shapeA[i][1] = oy * swell;
+        c.shapeA[i][2] = oz * swell;
+        c.shapeA[i][3] = b.r * 0.66f * (0.88f + 0.30f * pulse * b.weight);
+
+        // The second vector turns as well, so a limb or a ring is never
+        // pointing the same way twice.
+        float a1 = ph * 0.5f, a2 = ph * 0.37f;
+        float vx = b.bx, vy = b.by, vz = b.bz;
+        float rx = vx * cosf(a1) - vz * sinf(a1);
+        float rz = vx * sinf(a1) + vz * cosf(a1);
+        float ry = vy * cosf(a2) - rz * sinf(a2) * 0.35f;
+        float reach = (b.kind == 1) ? 1.15f : 0.9f;
+        c.shapeB[i][0] = rx * reach;
+        c.shapeB[i][1] = ry * reach;
+        c.shapeB[i][2] = rz * reach;
+        // Whole part is the kind, fraction is the secondary radius.
+        c.shapeB[i][3] = (float)clampi(b.kind, 0, 3) + clampf(b.param, 0.05f, 0.95f);
     }
 
     D3D11_MAPPED_SUBRESOURCE m{};

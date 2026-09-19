@@ -1,22 +1,24 @@
 // The generated cover, as a real object.
 //
-// A handful of spheres melted together with a smooth minimum, ray marched in
-// one pass over a full-screen triangle. The material is the point: frosted
-// translucent plastic - the light goes through it, the thin parts glow, the
-// edges catch a rim, and a little noise on the surface keeps it from looking
-// like polished glass.
+// Shapes melted together with a smooth minimum and ray marched in one pass
+// over a full-screen triangle. Two things carry the look:
+//
+//   The light is white. Every colour you see is the object splitting it -
+//   the three channels refract at slightly different angles, which is what a
+//   prism does and what a thick edge of frosted plastic does.
+//
+//   Nothing is painted behind it. The shader writes premultiplied alpha, so
+//   the object is genuinely translucent against whatever the window shows.
 //
 // Compiled by build.bat with fxc into a header, so the exe stays one file.
 
 cbuffer Scene : register(b0) {
     float4 uTime;        // x time, y pulse (the low end), z level, w unused
-    float4 uParams;      // x ball count, y blend radius, z seed, w rotation
-    float4 uLight;       // w intensity
-    float4 uLampCol[3];  // the three lamps, rgb
-    float4 uBg0;         // background, top
-    float4 uBg1;         // background, bottom
-    float4 uBall[8];     // xyz centre, w radius
-    float4 uTint[8];     // rgb colour
+    float4 uParams;      // x shape count, y blend radius, z seed, w rotation
+    float4 uForm;        // x twist, y mirror fold, z step scale, w unused
+    float4 uMat;         // x dispersion, y frost, z absorption, w opacity
+    float4 uShapeA[8];   // xyz centre, w radius
+    float4 uShapeB[8];   // xyz reach / axis / extents, w kind + secondary radius
 };
 
 struct VSOut {
@@ -49,36 +51,63 @@ float noise3(float3 x) {
                      lerp(hash13(i + float3(0, 1, 1)), hash13(i + float3(1, 1, 1)), f.x), f.y), f.z);
 }
 
-// ------------------------------------------------------------------ shape
+// ------------------------------------------------------------------ shapes
 float smin(float a, float b, float k) {
     float h = saturate(0.5 + 0.5 * (b - a) / k);
     return lerp(b, a, h) - k * h * (1.0 - h);
 }
 
-float map(float3 p) {
-    float d = 1e9;
-    int n = (int)uParams.x;
-    [loop] for (int i = 0; i < n; ++i)
-        d = smin(d, length(p - uBall[i].xyz) - uBall[i].w, uParams.y);
-    // Frost: a shallow ripple on the surface. Small enough not to break the
-    // distance field, which is why the march below still converges.
-    d += 0.014 * (noise3(p * 7.5 + uTime.x * 0.2) - 0.5);
-    return d;
+float sdCapsule(float3 p, float3 a, float3 b, float r) {
+    float3 pa = p - a, ba = b - a;
+    float h = saturate(dot(pa, ba) / max(dot(ba, ba), 1e-4));
+    return length(pa - ba * h) - r;
 }
 
-// Which lobe a point belongs to, softened the same way the shape is, so the
-// colour flows across the joins instead of switching at them.
-float3 tintAt(float3 p) {
-    float3 acc = 0;
-    float wsum = 1e-5;
+float sdRing(float3 p, float3 c, float3 axis, float major, float minor) {
+    float3 q = p - c;
+    float y = dot(q, axis);
+    float x = length(q - axis * y);
+    return length(float2(x - major, y)) - minor;
+}
+
+float sdRoundBox(float3 p, float3 c, float3 b, float r) {
+    float3 q = abs(p - c) - b;
+    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r;
+}
+
+// Wringing and folding the space is what makes two objects built from the
+// same parts read as different things.
+float3 deform(float3 p) {
+    if (uForm.y > 0.001) p.x = abs(p.x) - uForm.y;
+    float a = p.y * uForm.x;
+    float c = cos(a), s = sin(a);
+    return float3(p.x * c - p.z * s, p.y, p.x * s + p.z * c);
+}
+
+float map(float3 pw) {
+    float3 p = deform(pw);
+    float d = 1e9;
     int n = (int)uParams.x;
     [loop] for (int i = 0; i < n; ++i) {
-        float d = length(p - uBall[i].xyz) - uBall[i].w;
-        float w = exp(-max(d, 0.0) * 4.5);
-        acc += uTint[i].rgb * w;
-        wsum += w;
+        float3 A = uShapeA[i].xyz;
+        float  r = uShapeA[i].w;
+        float3 B = uShapeB[i].xyz;
+        float  kp = uShapeB[i].w;
+        int    kind = (int)floor(kp);
+        float  minor = max(0.04, frac(kp)) * r;
+
+        float di;
+        if (kind == 1)      di = sdCapsule(p, A, A + B, r * 0.62);
+        else if (kind == 2) di = sdRing(p, A, normalize(B + float3(0, 0, 1e-3)), r, minor);
+        else if (kind == 3) di = sdRoundBox(p, A, abs(B) * r * 0.85, minor);
+        else                di = length(p - A) - r;
+
+        d = smin(d, di, uParams.y);
     }
-    return acc / wsum;
+    // Frost: a shallow ripple on the surface. Small enough not to break the
+    // distance field, which is why the march below still converges.
+    d += uMat.y * (noise3(p * 7.5 + uTime.x * 0.2) - 0.5);
+    return d;
 }
 
 float3 normalAt(float3 p) {
@@ -97,22 +126,22 @@ float3x3 rotX(float a) {
     return float3x3(1, 0, 0,  0, c, -s,  0, s, c);
 }
 
-// ------------------------------------------------------------------ shading
-// The backdrop is a function rather than a value because the material looks
-// through it: a transparent sheet bends what is behind it, and sampling the
-// same gradient at a bent coordinate is all that takes.
-float3 bgAt(float2 uv) {
-    float2 q = uv - 0.5;
-    float3 bg = lerp(uBg0.rgb, uBg1.rgb, saturate(uv.y * 0.9 + 0.05));
-    bg *= 1.0 - 0.85 * saturate(length(q) * 1.9 - 0.42);
-    return bg;
+// ------------------------------------------------------------------ light
+// A plain white studio: a bright side, a dark floor, three hard lamps.
+// Nothing here is coloured, deliberately - every colour in the picture is the
+// object splitting this light.
+float3 env(float3 d) {
+    float up = saturate(d.y * 0.5 + 0.5);
+    float3 c = lerp(float3(0.16, 0.17, 0.20), float3(0.98, 0.99, 1.04), up * up);
+    c += pow(saturate(dot(d, normalize(float3(-0.52, 0.70, -0.45)))), 60.0) * 9.0;
+    c += pow(saturate(dot(d, normalize(float3(0.76, 0.22, -0.52)))), 80.0) * 7.0;
+    c += pow(saturate(dot(d, normalize(float3(0.10, -0.72, -0.60)))), 50.0) * 4.0;
+    return c;
 }
 
 float4 PSMain(VSOut input) : SV_Target {
     float2 uv = input.uv;
     float2 q = uv - 0.5;
-
-    float3 bg = bgAt(uv) + (hash13(float3(uv * 900.0, uParams.z)) - 0.5) * 0.016;
 
     // ---- camera
     float3 ro = float3(0, 0, -2.75);
@@ -126,31 +155,27 @@ float4 PSMain(VSOut input) : SV_Target {
     float t = 0.0;
     float glow = 0.0;
     bool hit = false;
-    [loop] for (int i = 0; i < 72; ++i) {
+    [loop] for (int i = 0; i < 80; ++i) {
         float3 p = ro + rd * t;
         float d = map(p);
-        // What passes close to the surface without touching it becomes the
-        // halo: it costs nothing here and is most of the sense of light.
-        glow += exp(-d * 9.0) * 0.012;
+        // What passes close without touching becomes the halo.
+        glow += exp(-d * 11.0) * 0.009;
         if (d < 0.0016) { hit = true; break; }
-        t += max(d * 0.85, 0.004);
+        t += max(d * uForm.z, 0.004);
         if (t > 6.0) break;
     }
 
-    float3 col = bg;
+    float3 col = 0;
+    float  alpha = 0;
+
     if (hit) {
         float3 p = ro + rd * t;
         float3 n = normalAt(p);
         // Frosted, not polished. The grain on the normal is most of what
         // separates a rain sheet from a glass marble.
-        n = normalize(n + 0.16 * (float3(noise3(p * 15.0 + 3.1),
+        n = normalize(n + 0.17 * (float3(noise3(p * 15.0 + 3.1),
                                          noise3(p * 15.0 + 7.7),
                                          noise3(p * 15.0 + 11.3)) - 0.5));
-
-        float3 tint = tintAt(p);
-        // The material is nearly colourless, like a rain sheet. What gives it
-        // colour is the light, which is where the track's palette went.
-        float3 albedo = lerp(float3(0.90, 0.92, 0.95), tint, 0.20);
 
         // How much material is behind this point, sampled a few steps in.
         float thick = 0.0;
@@ -158,53 +183,50 @@ float4 PSMain(VSOut input) : SV_Target {
             thick += saturate(-map(p + rd * (0.13 * s)) * 2.2);
         thick *= 0.2;
 
-        float fres = pow(1.0 - saturate(dot(n, -rd)), 2.6);
+        float fres = pow(1.0 - saturate(dot(n, -rd)), 3.0);
 
-        // Three coloured lamps around it, turning with the object.
-        float sp2 = uTime.x * uParams.w * 0.6;
-        float3 dirs[3] = {
-            normalize(float3(-0.62, 0.70, -0.40 + 0.25 * sin(sp2))),
-            normalize(float3(0.78 + 0.2 * cos(sp2), 0.22, -0.55)),
-            normalize(float3(0.05, -0.80, -0.55 - 0.2 * sin(sp2 * 0.7)))
-        };
-        float3 cols[3] = { uLampCol[0].rgb, uLampCol[1].rgb, uLampCol[2].rgb };
+        // The three channels bend by different amounts. That difference is
+        // the whole palette: white light in, colour out.
+        float disp = uMat.x;
+        float3 tr;
+        tr.r = env(refract(rd, n, 1.0 / (1.45 - disp))).r;
+        tr.g = env(refract(rd, n, 1.0 / 1.45)).g;
+        tr.b = env(refract(rd, n, 1.0 / (1.45 + disp))).b;
 
-        float3 lit = 0;
-        float3 gloss = 0;
-        [unroll] for (int k = 0; k < 3; ++k) {
-            float3 L = dirs[k];
-            float wrap = saturate(dot(n, L) * 0.5 + 0.5);              // soft plastic
-            float3 h = normalize(L - rd);
-            float sp = pow(saturate(dot(n, h)), 16.0) * (0.25 + 0.75 * noise3(p * 20.0));
-            // Light that came through from behind: the thin parts glow, which
-            // is the whole look of a sheet of translucent plastic.
-            float back = pow(saturate(dot(-n, L) * 0.5 + 0.5), 2.0) * exp(-thick * 2.4);
-            lit += cols[k] * (wrap * 0.42 + back * 0.55);
-            gloss += cols[k] * sp;
-        }
-        lit *= uLight.w;
+        // A second, rougher sample: frosted plastic scatters what passes it.
+        float3 nb = normalize(n + 0.45 * (float3(noise3(p * 6.0 + 21.0),
+                                                 noise3(p * 6.0 + 37.0),
+                                                 noise3(p * 6.0 + 53.0)) - 0.5));
+        tr = lerp(tr, env(refract(rd, nb, 1.0 / 1.45)), 0.30);
 
-        // Look through it: the sheet bends the backdrop, and the further the
-        // surface leans away the more it bends.
-        float2 duv = uv + n.xy * (0.05 + 0.07 * thick) + (n.xy * 0.02) * fres;
-        float3 behind = bgAt(saturate(duv));
+        // Thick parts swallow more of the short wavelengths, the way a real
+        // block of plastic goes warm through the middle.
+        tr *= exp(-thick * uMat.z * float3(0.55, 0.78, 1.0));
 
-        // Milky where there is material to cross, clear where there is not.
-        float milk = saturate(0.14 + 0.62 * thick);
-        float3 body = behind * (1.0 - milk * 0.82) + albedo * lit * milk;
-        body += albedo * lit * fres * 0.85;                    // the lit edge
-        body += gloss * 0.7;                                   // a dull highlight
-        // Frost is uneven, and that unevenness is what the eye reads as plastic.
-        body *= 0.82 + 0.36 * noise3(p * 34.0 + uTime.x * 0.1);
+        // A grazing edge reflects, but only so far: let it reach pure white
+        // and the object grows an outline it should not have.
+        float3 refl = env(reflect(rd, n));
+        col = lerp(tr, refl, saturate(0.05 + 0.42 * fres));
+        col *= 1.18;
 
-        col = body;
+        // Thin-film interference: the same white light, split again by the
+        // skin of the material. This is where most of the colour comes from
+        // on a surface this soft - pure refraction only paints the edges.
+        float film = thick * 3.2 + fres * 1.6 + noise3(p * 4.0) * 0.35;
+        float3 irid = 0.5 + 0.5 * cos(6.2831 * (film + float3(0.00, 0.33, 0.67)));
+        col *= 0.86 + 0.34 * irid;
+        col += irid * (0.10 + 0.55 * fres) * (0.4 + 0.6 * uTime.z);
+        // Frost is uneven, and that unevenness is what reads as plastic.
+        col *= (0.84 + 0.32 * noise3(p * 34.0 + uTime.x * 0.1)) * 1.30;
+
+        // How much of the window behind it this pixel hides.
+        alpha = saturate((0.34 + 0.52 * thick + 0.26 * fres) * uMat.w);
     }
 
-    // The halo takes the colour of the lamps, so the light looks like it is
-    // coming off the object rather than being painted behind it.
-    float3 lampAvg = (uLampCol[0].rgb + uLampCol[1].rgb + uLampCol[2].rgb) / 3.0;
-    col += glow * lampAvg * 1.35;
-    // A last touch of grain over everything, which is what sells the frost.
-    col += (hash13(float3(uv * 1400.0, uParams.z + 2.0)) - 0.5) * 0.030;
-    return float4(saturate(col), 1.0);
+    // The halo is light: it adds without hiding anything behind it.
+    col = col * alpha + glow * float3(0.86, 0.89, 1.0) * 0.85;
+    alpha = saturate(alpha + glow * 0.30);
+
+    col += (hash13(float3(uv * 1400.0, uParams.z + 2.0)) - 0.5) * 0.020 * alpha;
+    return float4(max(col, 0.0), alpha);
 }

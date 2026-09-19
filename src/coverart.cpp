@@ -58,6 +58,13 @@ void coverPlan(const wstring& path, CoverPlan& out) {
     out.rot = r.f(-0.22f, 0.22f);
     out.spread = r.f(0.13f, 0.24f);
 
+    // What kind of body this track gets. Spheres alone all look alike, so a
+    // track is one of these arrangements instead, and may be wrung or folded
+    // on top of that.
+    int form = r.i(5);                       // 0 blobs, 1 chain, 2 rings, 3 slabs, 4 mixed
+    out.twist = (r.i(3) == 0) ? r.f(-0.75f, 0.75f) : 0.f;
+    out.mirror = (r.i(4) == 0) ? r.f(0.05f, 0.35f) : 0.f;
+
     for (int i = 0; i < n; ++i) {
         CoverLobe b;
         // The first one is the core: without something hot in the middle the
@@ -79,6 +86,18 @@ void coverPlan(const wstring& path, CoverPlan& out) {
         b.lean = ang;
         b.alpha = core ? 1.f : 0.95f;
         b.z = core ? r.f(-0.15f, 0.15f) : r.f(-0.65f, 0.65f);
+
+        switch (form) {
+            case 1: b.kind = (i == 0) ? 0 : 1; break;         // a chain of limbs
+            case 2: b.kind = (i % 2) ? 2 : 0; break;          // rings through blobs
+            case 3: b.kind = (i % 3 == 0) ? 0 : 3; break;     // slabs and corners
+            case 4: b.kind = r.i(4); break;                   // whatever comes up
+            default: b.kind = 0; break;
+        }
+        b.bx = r.f(-1.f, 1.f);
+        b.by = r.f(-1.f, 1.f);
+        b.bz = r.f(-0.8f, 0.8f);
+        b.param = r.f(0.22f, 0.5f);
         coverHsl(h0 + step * i + r.f(-0.02f, 0.02f), r.f(0.92f, 1.f), r.f(0.50f, 0.60f),
                  b.cr, b.cg, b.cb);
         out.lobes.push_back(b);
