@@ -19,7 +19,7 @@ set -euo pipefail
 DISK=${DISK:-/dev/sda}
 USERNAME=${USERNAME:-dev}
 PASSWORD=${PASSWORD:-dev}
-HOSTNAME=${HOSTNAME:-picoview-vm}
+VMHOST=${VMHOST:-picoview-vm}   # not HOSTNAME: bash sets that one itself
 # Pass AUTHKEY='ssh-ed25519 ...' and that key can log in straight away, which
 # is what makes the rest of the work possible without typing into a console.
 AUTHKEY=${AUTHKEY:-}
@@ -68,7 +68,7 @@ sed -i 's/^#en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen
 sed -i 's/^#uk_UA.UTF-8/uk_UA.UTF-8/' /etc/locale.gen
 locale-gen
 echo 'LANG=en_US.UTF-8' > /etc/locale.conf
-echo '$HOSTNAME' > /etc/hostname
+echo '$VMHOST' > /etc/hostname
 
 useradd -m -G wheel -s /bin/bash '$USERNAME'
 echo '$USERNAME:$PASSWORD' | chpasswd
