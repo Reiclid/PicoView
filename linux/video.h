@@ -20,6 +20,10 @@ namespace pv {
 
 class Video {
 public:
+    // Public because mpv's update callback is a free function and has to name
+    // the type it is handed.
+    struct Impl;
+
     ~Video();
 
     bool open(const std::string& path);
@@ -51,7 +55,6 @@ public:
     void pump();
 
 private:
-    struct Impl;
     Impl* p_ = nullptr;
 };
 
