@@ -120,11 +120,56 @@ meson compile -C build
 
 ### pacman
 
-`packaging/arch/PKGBUILD`. З клону:
+Два рецепти:
+
+| Тека | Що збирає | Коли |
+|---|---|---|
+| `packaging/arch/picoview-git` | поточну гілку `main` | **зараз** — тега не потребує |
+| `packaging/arch/picoview` | випуск за тегом | коли тег є |
+
+Перевірено на живому Arch: `makepkg` збирає, `pacman -U` ставить, бінарник з
+`/usr/bin/picoview` запускається під Hyprland. Пакет виходить **99 КБ**, у
+системі займає 191 КБ, залежить лише від `wayland`, `libxkbcommon` і
+`gcc-libs`.
+
+## Як віддати це людині з Arch
+
+**Хай збере сам** — нічого не треба пересилати, і він бачить, що збирає:
 
 ```bash
-cd packaging/arch && makepkg -si
+git clone https://github.com/Reiclid/PicoView.git
+cd PicoView/packaging/arch/picoview-git
+makepkg -si
 ```
+
+Потім просто `picoview ~/Pictures`, і програма вже в меню застосунків з
+іконкою.
+
+**Або надішліть готовий пакет** — один файл, ставиться штатно:
+
+```bash
+sudo pacman -U picoview-git-*.pkg.tar.zst
+```
+
+Зібраний пакет — `.pkg.tar.zst` з `makepkg`. Працює на `x86_64` з актуальним
+Arch; на старішій системі краще перший спосіб.
+
+**Щоб стало `yay -S picoview-git`** — треба викласти рецепт в AUR. Це
+одноразова дія власника репозиторію: додати SSH-ключ у профіль на
+aur.archlinux.org, далі
+
+```bash
+git clone ssh://aur@aur.archlinux.org/picoview-git.git
+cp packaging/arch/picoview-git/PKGBUILD picoview-git/
+cd picoview-git && makepkg --printsrcinfo > .SRCINFO
+git add PKGBUILD .SRCINFO && git commit -m "picoview-git" && git push
+```
+
+Після цього будь-хто ставить одною командою, і оновлення приходять самі.
+
+**Чого ще бракує для AUR по-хорошому:** у репозиторії немає файлу `LICENSE`, і
+`license=('custom')` у рецепті — це чесно, але не те, що хочеться бачити.
+Варто обрати ліцензію й покласти її файлом.
 
 ---
 

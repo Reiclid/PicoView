@@ -71,3 +71,6 @@ $RECYCLE.BIN/
 plugins/*.dll
 !plugins/dist/**/*.dll
 plugins/*/build/
+
+# Built Arch packages
+*.pkg.tar.zst
