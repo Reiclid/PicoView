@@ -20,7 +20,9 @@ if [[ -z ${sig:-} ]]; then
     exit 1
 fi
 export HYPRLAND_INSTANCE_SIGNATURE=$sig
-export WAYLAND_DISPLAY=wayland-1
+# Whichever socket the session actually made, rather than the one it usually
+# makes.
+export WAYLAND_DISPLAY=$(basename "$(ls -t "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v '\.lock$' | head -1)")
 
 out=~/out
 mkdir -p "$out"
