@@ -73,7 +73,13 @@ void coverPlanFromSeed(uint64_t seed, CoverPlan& out) {
     // read as one glowing thing, the way a flame goes red to orange to yellow.
     float h0 = r.f();
     out.hue = h0;
-    float step = r.f(0.06f, 0.15f) * (r.i(2) ? 1.f : -1.f);
+    // Two draws from one generator inside one expression: which is taken first
+    // is unspecified in C++, and the two compilers disagreed, so the hue step
+    // - and its sign - came out different. Every lobe after the first was then
+    // a different colour on Linux than on Windows. Taken apart here, in the
+    // order MSVC used, so what Windows has always drawn is what both draw.
+    float dir = r.i(2) ? 1.f : -1.f;
+    float step = r.f(0.06f, 0.15f) * dir;
     int n = 5 + r.i(3);
     out.rot = r.f(-0.22f, 0.22f);
     out.spread = r.f(0.13f, 0.24f);
@@ -118,8 +124,16 @@ void coverPlanFromSeed(uint64_t seed, CoverPlan& out) {
         b.by = r.f(-1.f, 1.f);
         b.bz = r.f(-0.8f, 0.8f);
         b.param = r.f(0.22f, 0.5f);
-        coverHsl(h0 + step * i + r.f(-0.02f, 0.02f), r.f(0.92f, 1.f), r.f(0.50f, 0.60f),
-                 b.cr, b.cg, b.cb);
+        // Three draws from one generator, and the order they are taken in
+        // decides the colour. As arguments to one call that order is
+        // unspecified - MSVC took them right to left and GCC left to right,
+        // and the same track came out a different colour on each. They are
+        // pulled out here in the order MSVC used, so that what Windows has
+        // always drawn is what both now draw.
+        float light = r.f(0.50f, 0.60f);
+        float sat = r.f(0.92f, 1.f);
+        float jitter = r.f(-0.02f, 0.02f);
+        coverHsl(h0 + step * i + jitter, sat, light, b.cr, b.cg, b.cb);
         out.lobes.push_back(b);
     }
 }

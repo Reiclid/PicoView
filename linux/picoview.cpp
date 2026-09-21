@@ -372,6 +372,30 @@ void redraw() {
     clampPan();
     paint(*b);
 
+    // A way to see exactly what was composited, rather than measuring a
+    // screenshot with a ruler: PV_DUMP=/tmp/x.ppm writes the first frame out.
+    if (const char* dump = getenv("PV_DUMP")) {
+        static bool once = false;
+        // Not the very first frame: that one is painted in answer to the
+        // compositor's configure, before anything has been opened.
+        if (!once && g.image.ok) {
+            once = true;
+            if (FILE* f = fopen(dump, "wb")) {
+                fprintf(f, "P6\n%d %d\n255\n", b->w, b->h);
+                for (int y = 0; y < b->h; ++y) {
+                    const uint8_t* row = b->data + (size_t)y * b->w * 4;
+                    for (int x = 0; x < b->w; ++x) {
+                        fputc(row[x * 4 + 2], f);   // R
+                        fputc(row[x * 4 + 1], f);   // G
+                        fputc(row[x * 4 + 0], f);   // B
+                    }
+                }
+                fclose(f);
+                fprintf(stderr, "picoview: wrote %s (%dx%d)\n", dump, b->w, b->h);
+            }
+        }
+    }
+
     wl_surface_attach(g.surface, b->buf, 0, 0);
     wl_surface_damage_buffer(g.surface, 0, 0, b->w, b->h);
     wl_surface_commit(g.surface);
@@ -517,10 +541,23 @@ void ptFrame(void*, wl_pointer*) {}
 void ptAxisSource(void*, wl_pointer*, uint32_t) {}
 void ptAxisStop(void*, wl_pointer*, uint32_t, uint32_t) {}
 void ptAxisDiscrete(void*, wl_pointer*, uint32_t, int32_t) {}
-const wl_pointer_listener kPointer = {
-    ptEnter, ptLeave, ptMotion, ptButton, ptAxis,
-    ptFrame, ptAxisSource, ptAxisStop, ptAxisDiscrete
-};
+// Filled in by assignment rather than as an aggregate: wl_pointer_listener has
+// grown twice since this was written, and a list of initialisers would warn on
+// a new wayland-client and fail to compile on an old one.
+wl_pointer_listener makePointerListener() {
+    wl_pointer_listener l{};
+    l.enter = ptEnter;
+    l.leave = ptLeave;
+    l.motion = ptMotion;
+    l.button = ptButton;
+    l.axis = ptAxis;
+    l.frame = ptFrame;
+    l.axis_source = ptAxisSource;
+    l.axis_stop = ptAxisStop;
+    l.axis_discrete = ptAxisDiscrete;
+    return l;
+}
+const wl_pointer_listener kPointer = makePointerListener();
 
 void seatCaps(void*, wl_seat* seat, uint32_t caps) {
     if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !g.keyboard) {
@@ -563,9 +600,15 @@ void toplevelConfigure(void*, xdg_toplevel*, int32_t w, int32_t h, wl_array* sta
 void toplevelClose(void*, xdg_toplevel*) { g.running = false; }
 void toplevelBounds(void*, xdg_toplevel*, int32_t, int32_t) {}
 void toplevelCaps(void*, xdg_toplevel*, wl_array*) {}
-const xdg_toplevel_listener kToplevel = {
-    toplevelConfigure, toplevelClose, toplevelBounds, toplevelCaps
-};
+xdg_toplevel_listener makeToplevelListener() {
+    xdg_toplevel_listener l{};
+    l.configure = toplevelConfigure;
+    l.close = toplevelClose;
+    l.configure_bounds = toplevelBounds;
+    l.wm_capabilities = toplevelCaps;
+    return l;
+}
+const xdg_toplevel_listener kToplevel = makeToplevelListener();
 
 void registryAdd(void*, wl_registry* reg, uint32_t id, const char* iface, uint32_t ver) {
     if (!strcmp(iface, wl_compositor_interface.name)) {
