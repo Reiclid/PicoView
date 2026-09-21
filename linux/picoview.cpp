@@ -13,8 +13,9 @@
 //
 // What it deliberately does not do yet, and why:
 //
-//   - No text. Text means HarfBuzz, FreeType and fontconfig, and none of them
-//     belongs in the first version of anything.
+//   - No shaping. FreeType draws the glyphs and fontconfig finds the font, but
+//     the string is walked a character at a time. Latin and Cyrillic do not
+//     mind; the day an Arabic file name turns up, HarfBuzz goes in text.cpp.
 //   - No GPU. Everything is composited on the processor into a wl_shm buffer.
 //     A still picture does not need a Vulkan context, and not having one keeps
 //     this to a single dependency-light binary. Stage two is where that
@@ -52,6 +53,8 @@
 #include "../src/third_party/stb_image.h"
 
 #include "../src/core/coverplan.h"
+#include "paint.h"
+#include "text.h"
 
 // ------------------------------------------------------------------ state
 namespace {
@@ -99,6 +102,12 @@ struct App {
     bool           running = true;
     bool           dirty = true;
     bool           fullscreen = false;
+
+    // ---- interface
+    pv::Font*      fBody = nullptr;
+    pv::Font*      fSmall = nullptr;
+    bool           pointerIn = false;    // the bar is there when the pointer is
+    int            hot = 0, pressed = 0;
 
     // ---- pointer
     double         mouseX = 0, mouseY = 0;
@@ -239,13 +248,12 @@ void openAt(int index) {
 }
 
 // ------------------------------------------------------------------ drawing
-float fitZoom() {
+float fitZoomFor(int w, int h) {
     if (!g.image.ok || g.image.w <= 0 || g.image.h <= 0) return 1.f;
-    float sx = (float)g.width / (float)g.image.w;
-    float sy = (float)g.height / (float)g.image.h;
-    float z = std::min(sx, sy);
+    float z = std::min((float)w / g.image.w, (float)h / g.image.h);
     return std::min(z, 1.f);         // never blow a small picture up to fit
 }
+float fitZoom() { return fitZoomFor(g.width, g.height); }
 
 void clampPan() {
     float z = g.fitted ? fitZoom() : g.zoom;
@@ -256,71 +264,181 @@ void clampPan() {
     g.panY = std::max(-slackY, std::min(slackY, g.panY));
 }
 
-// Bilinear, split across the cores. A twenty-four megapixel photo scaled into
-// a window is the one place this build would feel slow, so it is the one place
-// that is threaded.
-void blitRows(uint8_t* dst, int dstStride, int y0, int y1,
-              int dx, int dy, int dw, int dh) {
-    const Image& im = g.image;
-    const float invW = (float)im.w / (float)dw;
-    const float invH = (float)im.h / (float)dh;
+// ------------------------------------------------------------------ the bar
+// Immediate mode, like the Windows build: the layout is computed twice, once
+// to draw and once to hit test, and there is no widget tree to keep in step
+// with anything.
+enum {
+    B_NONE = 0, B_PREV, B_NEXT, B_ZOUT, B_ZIN, B_FIT, B_ACTUAL, B_FULL
+};
 
-    for (int y = y0; y < y1; ++y) {
-        uint8_t* row = dst + (size_t)y * dstStride;
-        float sy = ((float)(y - dy) + 0.5f) * invH - 0.5f;
-        int   iy = (int)floorf(sy);
-        float fy = sy - iy;
-        int   y1i = std::min(std::max(iy, 0), im.h - 1);
-        int   y2i = std::min(std::max(iy + 1, 0), im.h - 1);
-        const uint8_t* r1 = im.px.data() + (size_t)y1i * im.w * 4;
-        const uint8_t* r2 = im.px.data() + (size_t)y2i * im.w * 4;
+struct Btn {
+    pv::Rect r;
+    int      id = B_NONE;
+    bool     on = false;             // drawn as held down
+};
 
-        int xa = std::max(0, dx), xb = std::min(g.width, dx + dw);
-        for (int x = xa; x < xb; ++x) {
-            float sx = ((float)(x - dx) + 0.5f) * invW - 0.5f;
-            int   ix = (int)floorf(sx);
-            float fx = sx - ix;
-            int   x1i = std::min(std::max(ix, 0), im.w - 1);
-            int   x2i = std::min(std::max(ix + 1, 0), im.w - 1);
-            uint8_t* o = row + x * 4;
-            for (int c = 0; c < 4; ++c) {
-                float a = r1[x1i * 4 + c] + (r1[x2i * 4 + c] - r1[x1i * 4 + c]) * fx;
-                float b = r2[x1i * 4 + c] + (r2[x2i * 4 + c] - r2[x1i * 4 + c]) * fx;
-                float v = a + (b - a) * fy;
-                o[c] = (uint8_t)std::min(255.f, std::max(0.f, v + 0.5f));
-            }
+// Colours, straight out of the Windows build's dark theme so the two look
+// like the same program.
+const pv::Color kCanvas = pv::rgba(27, 27, 29);
+const pv::Color kBar = pv::rgba(38, 38, 41, 0.94f);
+const pv::Color kBarEdge = pv::rgba(255, 255, 255, 0.09f);
+const pv::Color kText = pv::rgba(240, 240, 243);
+const pv::Color kTextDim = pv::rgba(240, 240, 243, 0.62f);
+const pv::Color kHover = pv::rgba(255, 255, 255, 0.10f);
+const pv::Color kHeld = pv::rgba(255, 255, 255, 0.18f);
+const pv::Color kAccent = pv::rgba(96, 165, 250);
+
+float fitZoomFor(int w, int h);
+
+std::vector<Btn> layoutBar(int W, int H, pv::Rect& barOut, pv::Rect& pctOut) {
+    const float bs = 40, gap = 4, pad = 10, pct = 62;
+    // prev next | out % in | fit 1:1 | full
+    float width = pad * 2 + bs * 6 + pct + gap * 8;
+    float x = (W - width) * 0.5f;
+    float y = H - bs - pad * 2 - 14;
+    barOut = pv::Rect{ x, y, width, bs + pad * 2 };
+
+    std::vector<Btn> v;
+    float cx = x + pad;
+    auto slot = [&](int id) {
+        v.push_back(Btn{ pv::Rect{ cx, y + pad, bs, bs }, id, false });
+        cx += bs + gap;
+    };
+    slot(B_PREV);
+    slot(B_NEXT);
+    cx += gap;
+    slot(B_ZOUT);
+    pctOut = pv::Rect{ cx, y + pad, pct, bs };
+    cx += pct + gap;
+    slot(B_ZIN);
+    cx += gap;
+    slot(B_FIT);
+    slot(B_ACTUAL);
+    cx += gap;
+    slot(B_FULL);
+    return v;
+}
+
+// The icons are drawn rather than typed: an icon font that is on every Linux
+// machine does not exist, and four triangles are cheaper than shipping one.
+void drawIcon(pv::Canvas& c, int id, pv::Rect r, pv::Color col) {
+    float cx = r.x + r.w * 0.5f, cy = r.y + r.h * 0.5f;
+    float k = r.h * 0.26f;                  // the icons all live in this box
+    switch (id) {
+        case B_PREV:
+            pv::fillTri(c, cx + k * 0.5f, cy - k, cx + k * 0.5f, cy + k, cx - k * 0.7f, cy, col);
+            break;
+        case B_NEXT:
+            pv::fillTri(c, cx - k * 0.5f, cy - k, cx - k * 0.5f, cy + k, cx + k * 0.7f, cy, col);
+            break;
+        case B_ZOUT:
+            pv::fillRound(c, pv::Rect{ cx - k, cy - 1.f, k * 2, 2.f }, 1.f, col);
+            break;
+        case B_ZIN:
+            pv::fillRound(c, pv::Rect{ cx - k, cy - 1.f, k * 2, 2.f }, 1.f, col);
+            pv::fillRound(c, pv::Rect{ cx - 1.f, cy - k, 2.f, k * 2 }, 1.f, col);
+            break;
+        case B_FIT:
+            pv::strokeRound(c, pv::Rect{ cx - k, cy - k * 0.8f, k * 2, k * 1.6f }, 2.f, 1.6f, col);
+            break;
+        case B_ACTUAL: {
+            // a square with a square in it: "one pixel is one pixel"
+            pv::strokeRound(c, pv::Rect{ cx - k, cy - k, k * 2, k * 2 }, 2.f, 1.6f, col);
+            pv::fillRound(c, pv::Rect{ cx - k * 0.3f, cy - k * 0.3f, k * 0.6f, k * 0.6f }, 1.f, col);
+            break;
         }
+        case B_FULL: {
+            float t = 1.8f, len = k * 0.85f;
+            for (int i = 0; i < 4; ++i) {
+                float sx = (i & 1) ? 1.f : -1.f, sy = (i & 2) ? 1.f : -1.f;
+                float ox = cx + sx * k, oy = cy + sy * k;
+                pv::fillRound(c, pv::Rect{ sx > 0 ? ox - len : ox, oy - t * 0.5f, len, t }, 1.f, col);
+                pv::fillRound(c, pv::Rect{ ox - t * 0.5f, sy > 0 ? oy - len : oy, t, len }, 1.f, col);
+            }
+            break;
+        }
+        default: break;
     }
 }
 
+void drawBar(pv::Canvas& c, int W, int H) {
+    if (!g.pointerIn) return;
+
+    pv::Rect bar, pct;
+    std::vector<Btn> btns = layoutBar(W, H, bar, pct);
+
+    pv::dropShadow(c, bar, bar.h * 0.5f, 10.f, 0.55f);
+    pv::fillRound(c, bar, bar.h * 0.5f, kBar);
+    pv::strokeRound(c, bar, bar.h * 0.5f, 1.f, kBarEdge);
+
+    for (const Btn& b : btns) {
+        bool held = (g.pressed == b.id);
+        bool hot = (g.hot == b.id);
+        if (held)     pv::fillRound(c, b.r, b.r.h * 0.5f, kHeld);
+        else if (hot) pv::fillRound(c, b.r, b.r.h * 0.5f, kHover);
+        bool lit = (b.id == B_FIT && g.fitted) ||
+                   (b.id == B_FULL && g.fullscreen) ||
+                   (b.id == B_ACTUAL && !g.fitted && fabsf(g.zoom - 1.f) < 0.001f);
+        drawIcon(c, b.id, b.r, lit ? kAccent : kText);
+    }
+
+    char buf[32];
+    float z = g.fitted ? fitZoomFor(W, H) : g.zoom;
+    snprintf(buf, sizeof(buf), "%d%%", (int)lroundf(z * 100.f));
+    pv::drawTextIn(c, g.fBody, buf, pct, kTextDim, pv::Align::Centre);
+}
+
+void drawCaption(pv::Canvas& c, int W) {
+    if (!g.pointerIn || g.files.empty()) return;
+
+    std::string name = nameOf(g.files[g.index]);
+    char meta[96];
+    if (g.image.ok)
+        snprintf(meta, sizeof(meta), "%d x %d   %d/%d", g.image.w, g.image.h,
+                 g.index + 1, (int)g.files.size());
+    else
+        snprintf(meta, sizeof(meta), "%d/%d", g.index + 1, (int)g.files.size());
+
+    float nameW = pv::textWidth(g.fBody, name.c_str());
+    float metaW = pv::textWidth(g.fSmall, meta);
+    float gap = 16, pad = 14, h = 34;
+    float w = std::min((float)W - 40.f, pad * 2 + nameW + gap + metaW);
+    pv::Rect pill{ (W - w) * 0.5f, 12, w, h };
+
+    pv::dropShadow(c, pill, h * 0.5f, 8.f, 0.5f);
+    pv::fillRound(c, pill, h * 0.5f, kBar);
+    pv::strokeRound(c, pill, h * 0.5f, 1.f, kBarEdge);
+
+    pv::Rect nb{ pill.x + pad, pill.y, nameW, h };
+    pv::drawTextIn(c, g.fBody, name.c_str(), nb, kText);
+    pv::Rect mb{ pill.right() - pad - metaW, pill.y, metaW, h };
+    pv::drawTextIn(c, g.fSmall, meta, mb, kTextDim);
+}
+
+// ------------------------------------------------------------------ frame
 void paint(Buffer& b) {
-    // The backdrop, dark like the other build's.
-    for (int y = 0; y < b.h; ++y) {
-        uint32_t* row = (uint32_t*)(b.data + (size_t)y * b.w * 4);
-        for (int x = 0; x < b.w; ++x) row[x] = 0xFF1B1B1D;
+    pv::Canvas c;
+    c.px = b.data;
+    c.w = b.w;
+    c.h = b.h;
+    c.stride = b.w * 4;
+    c.reset();
+
+    pv::clear(c, kCanvas);
+
+    if (g.image.ok) {
+        float z = g.fitted ? fitZoomFor(b.w, b.h) : g.zoom;
+        float dw = std::max(1.f, g.image.w * z);
+        float dh = std::max(1.f, g.image.h * z);
+        pv::Bitmap src{ g.image.px.data(), g.image.w, g.image.h, g.image.w * 4 };
+        pv::blit(c, src,
+                 pv::Rect{ (b.w - dw) * 0.5f + g.panX, (b.h - dh) * 0.5f + g.panY, dw, dh },
+                 z < 0.999f || z > 1.001f);
     }
-    if (!g.image.ok) return;
 
-    float z = g.fitted ? fitZoom() : g.zoom;
-    int dw = std::max(1, (int)lroundf(g.image.w * z));
-    int dh = std::max(1, (int)lroundf(g.image.h * z));
-    int dx = (int)lroundf((b.w - dw) * 0.5f + g.panX);
-    int dy = (int)lroundf((b.h - dh) * 0.5f + g.panY);
-
-    int y0 = std::max(0, dy), y1 = std::min(b.h, dy + dh);
-    if (y1 <= y0) return;
-
-    unsigned n = std::max(1u, std::min(std::thread::hardware_concurrency(), 8u));
-    if ((y1 - y0) < 64) n = 1;
-    std::vector<std::thread> pool;
-    int span = (y1 - y0 + (int)n - 1) / (int)n;
-    for (unsigned i = 0; i < n; ++i) {
-        int a = y0 + (int)i * span;
-        int c = std::min(y1, a + span);
-        if (a >= c) break;
-        pool.emplace_back(blitRows, b.data, b.w * 4, a, c, dx, dy, dw, dh);
-    }
-    for (auto& t : pool) t.join();
+    drawCaption(c, b.w);
+    drawBar(c, b.w, b.h);
 }
 
 // ------------------------------------------------------------------ buffers
@@ -404,6 +522,26 @@ void redraw() {
 }
 
 // ------------------------------------------------------------------ input
+// Which button is under a point, or B_NONE. The same layout the drawing used,
+// computed again rather than remembered - it is a dozen rectangles.
+int hitBar(double x, double y) {
+    if (!g.pointerIn) return B_NONE;
+    pv::Rect bar, pct;
+    std::vector<Btn> btns = layoutBar(g.width, g.height, bar, pct);
+    for (const Btn& b : btns)
+        if (b.r.contains((float)x, (float)y)) return b.id;
+    return B_NONE;
+}
+
+// True anywhere on the bar, not just on a button: a drag started on the bar
+// should not pan the picture underneath it.
+bool overBar(double x, double y) {
+    if (!g.pointerIn) return false;
+    pv::Rect bar, pct;
+    layoutBar(g.width, g.height, bar, pct);
+    return bar.contains((float)x, (float)y);
+}
+
 void zoomAt(float factor, double cx, double cy) {
     float before = g.fitted ? fitZoom() : g.zoom;
     float after = std::min(64.f, std::max(0.02f, before * factor));
@@ -415,6 +553,32 @@ void zoomAt(float factor, double cx, double cy) {
     g.zoom = after;
     g.fitted = false;
     g.dirty = true;
+}
+
+void doAction(int id) {
+    switch (id) {
+        case B_PREV: openAt(g.index - 1); break;
+        case B_NEXT: openAt(g.index + 1); break;
+        case B_ZOUT: zoomAt(1.f / 1.25f, g.width * 0.5, g.height * 0.5); break;
+        case B_ZIN:  zoomAt(1.25f, g.width * 0.5, g.height * 0.5); break;
+        case B_FIT:
+            g.fitted = true;
+            g.panX = g.panY = 0;
+            g.dirty = true;
+            break;
+        case B_ACTUAL:
+            g.zoom = 1.f;
+            g.fitted = false;
+            g.panX = g.panY = 0;
+            g.dirty = true;
+            break;
+        case B_FULL:
+            g.fullscreen = !g.fullscreen;
+            if (g.fullscreen) xdg_toplevel_set_fullscreen(g.toplevel, nullptr);
+            else              xdg_toplevel_unset_fullscreen(g.toplevel);
+            break;
+        default: break;
+    }
 }
 
 void onKey(xkb_keysym_t sym) {
@@ -505,11 +669,25 @@ const wl_keyboard_listener kKeyboard = {
 void ptEnter(void*, wl_pointer*, uint32_t, wl_surface*, wl_fixed_t x, wl_fixed_t y) {
     g.mouseX = wl_fixed_to_double(x);
     g.mouseY = wl_fixed_to_double(y);
+    // The bar and the caption are there while the pointer is, and gone when it
+    // is not. No timer, no fade, nothing to keep in step.
+    g.pointerIn = true;
+    g.hot = hitBar(g.mouseX, g.mouseY);
+    g.dirty = true;
 }
-void ptLeave(void*, wl_pointer*, uint32_t, wl_surface*) { g.dragging = false; }
+void ptLeave(void*, wl_pointer*, uint32_t, wl_surface*) {
+    g.dragging = false;
+    g.pointerIn = false;
+    g.hot = g.pressed = B_NONE;
+    g.dirty = true;
+}
 void ptMotion(void*, wl_pointer*, uint32_t, wl_fixed_t x, wl_fixed_t y) {
     g.mouseX = wl_fixed_to_double(x);
     g.mouseY = wl_fixed_to_double(y);
+    if (!g.pointerIn) { g.pointerIn = true; g.dirty = true; }
+    int was = g.hot;
+    g.hot = hitBar(g.mouseX, g.mouseY);
+    if (g.hot != was) g.dirty = true;
     if (g.dragging) {
         g.panX = g.dragPanX + (float)(g.mouseX - g.dragFromX);
         g.panY = g.dragPanY + (float)(g.mouseY - g.dragFromY);
@@ -520,6 +698,22 @@ void ptMotion(void*, wl_pointer*, uint32_t, wl_fixed_t x, wl_fixed_t y) {
 }
 void ptButton(void*, wl_pointer*, uint32_t, uint32_t, uint32_t button, uint32_t state) {
     if (button != BTN_LEFT) return;
+
+    if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+        int id = hitBar(g.mouseX, g.mouseY);
+        if (id != B_NONE) { g.pressed = id; g.dirty = true; return; }
+        if (overBar(g.mouseX, g.mouseY)) return;   // the bar swallows the drag
+    } else if (g.pressed != B_NONE) {
+        // Acting on release, and only if the pointer is still on the button,
+        // is what lets a mis-aimed press be taken back.
+        int id = hitBar(g.mouseX, g.mouseY);
+        int was = g.pressed;
+        g.pressed = B_NONE;
+        g.dirty = true;
+        if (id == was) doAction(was);
+        return;
+    }
+
     if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
         g.dragging = true;
         g.dragFromX = g.mouseX;
@@ -676,6 +870,11 @@ int main(int argc, char** argv) {
     }
 
     g.xkb = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+    // Whatever this machine calls its sans-serif. Asking for a specific family
+    // would mean shipping one, and shipping a font to draw a file name is not
+    // a trade worth making.
+    g.fBody = pv::fontOpen(nullptr, 15.f, false);
+    g.fSmall = pv::fontOpen(nullptr, 12.f, false);
     g.surface = wl_compositor_create_surface(g.compositor);
     g.xsurface = xdg_wm_base_get_xdg_surface(g.wmBase, g.surface);
     xdg_surface_add_listener(g.xsurface, &kXdgSurface, nullptr);
@@ -707,6 +906,8 @@ int main(int argc, char** argv) {
         if (b.buf) wl_buffer_destroy(b.buf);
         if (b.data) munmap(b.data, b.size);
     }
+    pv::fontClose(g.fBody);
+    pv::fontClose(g.fSmall);
     if (g.xkbState) xkb_state_unref(g.xkbState);
     if (g.keymap) xkb_keymap_unref(g.keymap);
     if (g.xkb) xkb_context_unref(g.xkb);

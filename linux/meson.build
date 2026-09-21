@@ -14,6 +14,9 @@ cc = meson.get_compiler('cpp')
 wl_client = dependency('wayland-client')
 wl_protos = dependency('wayland-protocols', version : '>=1.25')
 xkb       = dependency('xkbcommon')
+# Text: fontconfig finds a font file, FreeType turns characters into pixels.
+freetype  = dependency('freetype2')
+fontcfg   = dependency('fontconfig')
 threads   = dependency('threads')
 m_dep     = cc.find_library('m', required : false)
 
@@ -44,13 +47,15 @@ endforeach
 
 sources = [
   'picoview.cpp',
+  'paint.cpp',
+  'text.cpp',
   '../src/core/coverplan.cpp',
   '../src/core/loudness_math.cpp',
 ]
 
 executable('picoview',
   sources + proto_src + proto_hdr,
-  dependencies : [wl_client, xkb, threads, m_dep],
+  dependencies : [wl_client, xkb, freetype, fontcfg, threads, m_dep],
   install : true)
 
 install_data('picoview.desktop', install_dir : get_option('datadir') / 'applications')
