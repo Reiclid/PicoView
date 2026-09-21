@@ -17,6 +17,9 @@ xkb       = dependency('xkbcommon')
 # Text: fontconfig finds a font file, FreeType turns characters into pixels.
 freetype  = dependency('freetype2')
 fontcfg   = dependency('fontconfig')
+# Video and sound. Writing a player on ffmpeg directly means writing demuxing,
+# timing and audio sync; libmpv is that program, as a library.
+mpv       = dependency('mpv')
 threads   = dependency('threads')
 m_dep     = cc.find_library('m', required : false)
 
@@ -49,13 +52,14 @@ sources = [
   'picoview.cpp',
   'paint.cpp',
   'text.cpp',
+  'video.cpp',
   '../src/core/coverplan.cpp',
   '../src/core/loudness_math.cpp',
 ]
 
 executable('picoview',
   sources + proto_src + proto_hdr,
-  dependencies : [wl_client, xkb, freetype, fontcfg, threads, m_dep],
+  dependencies : [wl_client, xkb, freetype, fontcfg, mpv, threads, m_dep],
   install : true)
 
 install_data('picoview.desktop', install_dir : get_option('datadir') / 'applications')

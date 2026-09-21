@@ -55,6 +55,9 @@
 #include "../src/core/coverplan.h"
 #include "paint.h"
 #include "text.h"
+#include "video.h"
+
+#include <poll.h>
 
 // ------------------------------------------------------------------ state
 namespace {
@@ -120,6 +123,8 @@ struct App {
     int            index = 0;
     std::string    folder;
     Image          image;
+    pv::Video      video;
+    bool           seekDrag = false;
     float          zoom = 1.f;
     bool           fitted = true;       // zoom follows the window until touched
     float          panX = 0, panY = 0;
@@ -147,13 +152,8 @@ bool isPicture(const std::string& s) {
     return false;
 }
 
-bool isMusic(const std::string& s) {
-    static const char* ext[] = { ".mp3", ".wav", ".flac", ".m4a", ".ogg", ".opus",
-                                 ".wma", ".aac", nullptr };
-    for (int i = 0; ext[i]; ++i)
-        if (endsWithLower(s, ext[i])) return true;
-    return false;
-}
+bool isMusic(const std::string& s) { return pv::isAudioName(s); }
+bool isFilm(const std::string& s) { return pv::isVideoName(s); }
 
 std::string dirOf(const std::string& path) {
     size_t at = path.find_last_of('/');
@@ -174,7 +174,7 @@ void scanFolder(const std::string& dir, const std::string& select) {
         while (dirent* e = readdir(d)) {
             if (e->d_name[0] == '.') continue;
             std::string name = e->d_name;
-            if (!isPicture(name) && !isMusic(name)) continue;
+            if (!isPicture(name) && !isMusic(name) && !isFilm(name)) continue;
             std::string full = dir + "/" + name;
             struct stat st;
             if (stat(full.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
@@ -236,9 +236,20 @@ void openAt(int index) {
     if (index >= (int)g.files.size()) index = 0;
     g.index = index;
     const std::string& path = g.files[index];
-    g.image = isMusic(path) ? loadCover(path) : loadPicture(path);
-    if (!g.image.ok)
-        fprintf(stderr, "picoview: cannot read %s\n", path.c_str());
+
+    g.video.close();
+    g.image = Image();
+    if (isFilm(path) || isMusic(path)) {
+        // Both go to mpv: a music file is a video with nothing to look at, and
+        // the picture it gets instead is the one the shared core makes up.
+        if (!g.video.open(path))
+            fprintf(stderr, "picoview: %s\n", g.video.error().c_str());
+        if (isMusic(path)) g.image = loadCover(path);
+    } else {
+        g.image = loadPicture(path);
+        if (!g.image.ok)
+            fprintf(stderr, "picoview: cannot read %s\n", path.c_str());
+    }
     g.fitted = true;
     g.panX = g.panY = 0;
     g.dirty = true;
@@ -269,7 +280,7 @@ void clampPan() {
 // to draw and once to hit test, and there is no widget tree to keep in step
 // with anything.
 enum {
-    B_NONE = 0, B_PREV, B_NEXT, B_ZOUT, B_ZIN, B_FIT, B_ACTUAL, B_FULL
+    B_NONE = 0, B_PREV, B_NEXT, B_ZOUT, B_ZIN, B_FIT, B_ACTUAL, B_FULL, B_PLAY
 };
 
 struct Btn {
@@ -305,6 +316,10 @@ std::vector<Btn> layoutBar(int W, int H, pv::Rect& barOut, pv::Rect& pctOut) {
     };
     slot(B_PREV);
     slot(B_NEXT);
+    if (g.video.isOpen()) {
+        cx += sep;
+        slot(B_PLAY);
+    }
     cx += sep;
     slot(B_ZOUT);
     pctOut = pv::Rect{ cx, 0, pct, bs };
@@ -357,6 +372,17 @@ void drawIcon(pv::Canvas& c, int id, pv::Rect r, pv::Color col) {
             pv::fillRound(c, pv::Rect{ cx - k * 0.3f, cy - k * 0.3f, k * 0.6f, k * 0.6f }, 1.f, col);
             break;
         }
+        case B_PLAY: {
+            if (g.video.paused()) {
+                pv::fillTri(c, cx - k * 0.55f, cy - k, cx - k * 0.55f, cy + k,
+                            cx + k * 0.8f, cy, col);
+            } else {
+                float bw = k * 0.42f;
+                pv::fillRound(c, pv::Rect{ cx - k * 0.62f, cy - k, bw, k * 2 }, 1.f, col);
+                pv::fillRound(c, pv::Rect{ cx + k * 0.2f, cy - k, bw, k * 2 }, 1.f, col);
+            }
+            break;
+        }
         case B_FULL: {
             float t = 1.8f, len = k * 0.85f;
             for (int i = 0; i < 4; ++i) {
@@ -398,6 +424,45 @@ void drawBar(pv::Canvas& c, int W, int H) {
     pv::drawTextIn(c, g.fBody, buf, pct, kTextDim, pv::Align::Centre);
 }
 
+// Where the seek bar lives, so drawing and clicking agree about it.
+pv::Rect seekRect(int W, int H) {
+    pv::Rect bar, pct;
+    layoutBar(W, H, bar, pct);
+    return pv::Rect{ bar.x + 16, bar.y - 22, bar.w - 32, 14 };
+}
+
+std::string clockOf(double seconds) {
+    if (!(seconds >= 0)) seconds = 0;
+    int t = (int)(seconds + 0.0001);
+    char b[32];
+    if (t >= 3600) snprintf(b, sizeof(b), "%d:%02d:%02d", t / 3600, (t % 3600) / 60, t % 60);
+    else           snprintf(b, sizeof(b), "%d:%02d", t / 60, t % 60);
+    return b;
+}
+
+void drawSeek(pv::Canvas& c, int W, int H) {
+    if (!g.pointerIn || !g.video.isOpen()) return;
+    double dur = g.video.duration();
+    if (!(dur > 0)) return;
+
+    pv::Rect r = seekRect(W, H);
+    pv::Rect track{ r.x, r.y + r.h * 0.5f - 2.f, r.w, 4.f };
+
+    pv::dropShadow(c, pv::Rect{ r.x - 10, r.y - 6, r.w + 20, r.h + 12 }, 10.f, 8.f, 0.4f);
+    pv::fillRound(c, pv::Rect{ r.x - 10, r.y - 6, r.w + 20, r.h + 12 }, 10.f, kBar);
+
+    float t = (float)(g.video.position() / dur);
+    t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    pv::fillRound(c, track, 2.f, pv::rgba(255, 255, 255, 0.22f));
+    pv::fillRound(c, pv::Rect{ track.x, track.y, track.w * t, track.h }, 2.f, kAccent);
+    pv::fillRound(c, pv::Rect{ track.x + track.w * t - 5.f, r.y + r.h * 0.5f - 5.f, 10.f, 10.f },
+                  5.f, kText);
+
+    std::string now = clockOf(g.video.position()) + "  /  " + clockOf(dur);
+    pv::Rect tb{ r.x, r.y - 20, r.w, 18 };
+    pv::drawTextIn(c, g.fSmall, now.c_str(), tb, kTextDim, pv::Align::Centre);
+}
+
 void drawCaption(pv::Canvas& c, int W) {
     if (!g.pointerIn || g.files.empty()) return;
 
@@ -436,7 +501,11 @@ void paint(Buffer& b) {
 
     pv::clear(c, kCanvas);
 
-    if (g.image.ok) {
+    // A film fills the window, the way a player does, and mpv puts the bars on
+    // for us. Zoom and pan belong to pictures.
+    if (g.video.hasVideo()) {
+        g.video.render(b.data, b.w, b.h, b.w * 4);
+    } else if (g.image.ok) {
         float z = g.fitted ? fitZoomFor(b.w, b.h) : g.zoom;
         float dw = std::max(1.f, g.image.w * z);
         float dh = std::max(1.f, g.image.h * z);
@@ -447,6 +516,7 @@ void paint(Buffer& b) {
     }
 
     drawCaption(c, b.w);
+    drawSeek(c, b.w, b.h);
     drawBar(c, b.w, b.h);
 }
 
@@ -542,13 +612,35 @@ int hitBar(double x, double y) {
     return B_NONE;
 }
 
-// True anywhere on the bar, not just on a button: a drag started on the bar
-// should not pan the picture underneath it.
+// True anywhere on the bar or the seek strip, not just on a button: a drag
+// started there should not pan the picture underneath it.
 bool overBar(double x, double y) {
     if (!g.pointerIn) return false;
     pv::Rect bar, pct;
     layoutBar(g.width, g.height, bar, pct);
-    return bar.contains((float)x, (float)y);
+    if (bar.contains((float)x, (float)y)) return true;
+    if (g.video.isOpen() && g.video.duration() > 0) {
+        pv::Rect r = seekRect(g.width, g.height);
+        if (pv::Rect{ r.x - 10, r.y - 8, r.w + 20, r.h + 16 }.contains((float)x, (float)y))
+            return true;
+    }
+    return false;
+}
+
+// Dragging the handle scrubs; a click anywhere on the track jumps there.
+bool seekFromPoint(double x, double y, bool starting) {
+    if (!g.video.isOpen()) return false;
+    double dur = g.video.duration();
+    if (!(dur > 0)) return false;
+    pv::Rect r = seekRect(g.width, g.height);
+    if (starting &&
+        !pv::Rect{ r.x - 10, r.y - 8, r.w + 20, r.h + 16 }.contains((float)x, (float)y))
+        return false;
+    float t = (float)((x - r.x) / std::max(1.f, r.w));
+    t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    g.video.seekTo(dur * t);
+    g.dirty = true;
+    return true;
 }
 
 void zoomAt(float factor, double cx, double cy) {
@@ -581,6 +673,10 @@ void doAction(int id) {
             g.panX = g.panY = 0;
             g.dirty = true;
             break;
+        case B_PLAY:
+            g.video.togglePause();
+            g.dirty = true;
+            break;
         case B_FULL:
             g.fullscreen = !g.fullscreen;
             if (g.fullscreen) xdg_toplevel_set_fullscreen(g.toplevel, nullptr);
@@ -601,14 +697,24 @@ void onKey(xkb_keysym_t sym) {
                 g.running = false;
             }
             break;
+        case XKB_KEY_space:
+            if (g.video.isOpen()) { g.video.togglePause(); g.dirty = true; }
+            else openAt(g.index + 1);
+            break;
         case XKB_KEY_Right:
         case XKB_KEY_Next:
-        case XKB_KEY_space:
-            openAt(g.index + 1);
+            // On a film the arrows seek, the way they do on Windows.
+            if (g.video.isOpen() && g.video.duration() > 0) {
+                g.video.seekBy(g.shiftDown ? 30.0 : 5.0);
+                g.dirty = true;
+            } else openAt(g.index + 1);
             break;
         case XKB_KEY_Left:
         case XKB_KEY_Prior:
-            openAt(g.index - 1);
+            if (g.video.isOpen() && g.video.duration() > 0) {
+                g.video.seekBy(g.shiftDown ? -30.0 : -5.0);
+                g.dirty = true;
+            } else openAt(g.index - 1);
             break;
         case XKB_KEY_Home: openAt(0); break;
         case XKB_KEY_End:  openAt((int)g.files.size() - 1); break;
@@ -697,6 +803,7 @@ void ptMotion(void*, wl_pointer*, uint32_t, wl_fixed_t x, wl_fixed_t y) {
     int was = g.hot;
     g.hot = hitBar(g.mouseX, g.mouseY);
     if (g.hot != was) g.dirty = true;
+    if (g.seekDrag) { seekFromPoint(g.mouseX, g.mouseY, false); return; }
     if (g.dragging) {
         g.panX = g.dragPanX + (float)(g.mouseX - g.dragFromX);
         g.panY = g.dragPanY + (float)(g.mouseY - g.dragFromY);
@@ -711,7 +818,11 @@ void ptButton(void*, wl_pointer*, uint32_t, uint32_t, uint32_t button, uint32_t 
     if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
         int id = hitBar(g.mouseX, g.mouseY);
         if (id != B_NONE) { g.pressed = id; g.dirty = true; return; }
+        if (seekFromPoint(g.mouseX, g.mouseY, true)) { g.seekDrag = true; return; }
         if (overBar(g.mouseX, g.mouseY)) return;   // the bar swallows the drag
+    } else if (g.seekDrag) {
+        g.seekDrag = false;
+        return;
     } else if (g.pressed != B_NONE) {
         // Acting on release, and only if the pointer is still on the button,
         // is what lets a mis-aimed press be taken back.
@@ -907,9 +1018,30 @@ int main(int argc, char** argv) {
     openAt(g.index);
     redraw();
 
-    while (g.running && wl_display_dispatch(g.display) != -1) {
-        if (g.dirty) redraw();
+    // The loop has to answer to two things now: Wayland on its socket, and mpv
+    // on another thread. Wayland's prepare/read dance exists exactly so the
+    // second one cannot slip an event in between the check and the read.
+    while (g.running) {
+        while (wl_display_prepare_read(g.display) != 0)
+            wl_display_dispatch_pending(g.display);
+        wl_display_flush(g.display);
+
+        bool playing = g.video.isOpen() && !g.video.paused();
+        int timeout = (g.dirty || playing) ? 8 : (g.video.isOpen() ? 200 : -1);
+
+        pollfd pfd{ wl_display_get_fd(g.display), POLLIN, 0 };
+        int n = poll(&pfd, 1, timeout);
+        if (n > 0 && (pfd.revents & POLLIN)) {
+            if (wl_display_read_events(g.display) == -1) break;
+        } else {
+            wl_display_cancel_read(g.display);
+        }
+        if (wl_display_dispatch_pending(g.display) == -1) break;
+
+        g.video.pump();
+        if (g.dirty || g.video.wants()) redraw();
     }
+    g.video.close();
 
     for (auto& b : g.buffers) {
         if (b.buf) wl_buffer_destroy(b.buf);
