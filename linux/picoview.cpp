@@ -292,31 +292,40 @@ const pv::Color kAccent = pv::rgba(96, 165, 250);
 float fitZoomFor(int w, int h);
 
 std::vector<Btn> layoutBar(int W, int H, pv::Rect& barOut, pv::Rect& pctOut) {
-    const float bs = 40, gap = 4, pad = 10, pct = 62;
-    // prev next | out % in | fit 1:1 | full
-    float width = pad * 2 + bs * 6 + pct + gap * 8;
-    float x = (W - width) * 0.5f;
-    float y = H - bs - pad * 2 - 14;
-    barOut = pv::Rect{ x, y, width, bs + pad * 2 };
+    const float bs = 40, gap = 4, pad = 10, pct = 62, sep = 10;
 
+    // Laid out from zero first and centred afterwards. Working out the width
+    // with a formula and then laying the buttons out separately is how the
+    // last button ended up outside the bar: two descriptions of one thing.
     std::vector<Btn> v;
-    float cx = x + pad;
+    float cx = 0;
     auto slot = [&](int id) {
-        v.push_back(Btn{ pv::Rect{ cx, y + pad, bs, bs }, id, false });
+        v.push_back(Btn{ pv::Rect{ cx, 0, bs, bs }, id, false });
         cx += bs + gap;
     };
     slot(B_PREV);
     slot(B_NEXT);
-    cx += gap;
+    cx += sep;
     slot(B_ZOUT);
-    pctOut = pv::Rect{ cx, y + pad, pct, bs };
+    pctOut = pv::Rect{ cx, 0, pct, bs };
     cx += pct + gap;
     slot(B_ZIN);
-    cx += gap;
+    cx += sep;
     slot(B_FIT);
     slot(B_ACTUAL);
-    cx += gap;
+    cx += sep;
     slot(B_FULL);
+
+    float content = cx - gap;                 // the last slot leaves one behind
+    float width = content + pad * 2;
+    float x = (W - width) * 0.5f;
+    float y = H - bs - pad * 2 - 14;
+    barOut = pv::Rect{ x, y, width, bs + pad * 2 };
+
+    float ox = x + pad, oy = y + pad;
+    for (Btn& b : v) { b.r.x += ox; b.r.y += oy; }
+    pctOut.x += ox;
+    pctOut.y += oy;
     return v;
 }
 

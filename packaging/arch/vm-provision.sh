@@ -128,6 +128,15 @@ misc {
     disable_hyprland_logo = true
     disable_splash_rendering = true
     force_default_wallpaper = 0
+    disable_autoreload = true
+}
+ecosystem {
+    no_update_news = true
+    no_donation_nag = true
+}
+debug {
+    disable_logs = false
+    suppress_errors = true          # this is a test bench, not a desktop
 }
 input {
     kb_layout = us
