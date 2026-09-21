@@ -1,0 +1,35 @@
+# Maintainer: Reiclid <reiclid@gmail.com>
+#
+# Builds a tagged release. If the tag you want does not exist yet, use
+# ../picoview-git, which builds the default branch and needs no tag.
+#
+# What it is: stage one of the Linux front end - pictures, folder navigation,
+# zoom, pan, full screen, and the generated artwork for a music file. No video
+# and no text on screen yet. See docs/linux-port.md.
+
+pkgname=picoview
+pkgver=1.3.0
+pkgrel=1
+pkgdesc="Fast, small image viewer for Wayland"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Reiclid/PicoView"
+license=('custom')
+depends=('wayland' 'libxkbcommon' 'gcc-libs')
+makedepends=('meson' 'ninja' 'wayland-protocols' 'pkgconf')
+provides=('picoview')
+conflicts=('picoview-git')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "$srcdir/PicoView-$pkgver"
+    meson setup --prefix=/usr --buildtype=release build linux
+    meson compile -C build
+}
+
+package() {
+    cd "$srcdir/PicoView-$pkgver"
+    meson install -C build --destdir "$pkgdir"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 docs/linux-port.md "$pkgdir/usr/share/doc/$pkgname/linux-port.md"
+}

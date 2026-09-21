@@ -1,0 +1,46 @@
+# Maintainer: Reiclid <reiclid@gmail.com>
+#
+# Builds the Wayland front end straight from the default branch, so it works
+# whether or not there is a release tag to point at. This is the one to hand
+# someone who just wants the program:
+#
+#   makepkg -si
+#
+# What it is: stage one of the Linux front end - pictures, folder navigation,
+# zoom, pan, full screen, and the generated artwork for a music file. No video
+# and no text on screen yet. See docs/linux-port.md.
+
+pkgname=picoview-git
+pkgver=r0.0000000
+pkgrel=1
+pkgdesc="Fast, small image viewer for Wayland (development version)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Reiclid/PicoView"
+license=('custom')
+depends=('wayland' 'libxkbcommon' 'gcc-libs')
+makedepends=('git' 'meson' 'ninja' 'wayland-protocols' 'pkgconf')
+provides=('picoview')
+conflicts=('picoview')
+source=("$pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$srcdir/$pkgname"
+    # A tag if there is one, a commit count if there is not.
+    git describe --long --tags 2>/dev/null |
+        sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' ||
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+    cd "$srcdir/$pkgname"
+    meson setup --prefix=/usr --buildtype=release build linux
+    meson compile -C build
+}
+
+package() {
+    cd "$srcdir/$pkgname"
+    meson install -C build --destdir "$pkgdir"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 docs/linux-port.md "$pkgdir/usr/share/doc/$pkgname/linux-port.md"
+}

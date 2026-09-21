@@ -54,3 +54,5 @@ executable('picoview',
   install : true)
 
 install_data('picoview.desktop', install_dir : get_option('datadir') / 'applications')
+install_data('picoview.svg',
+  install_dir : get_option('datadir') / 'icons' / 'hicolor' / 'scalable' / 'apps')

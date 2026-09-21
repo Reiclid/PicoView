@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Small enough to read at 16 pixels, which is the only size an icon has to
+     survive. A frame with a horizon and a sun in it: the same idea as the
+     Windows icon, drawn with four shapes instead of four hundred. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3f6fd8"/>
+      <stop offset="1" stop-color="#7fc3b4"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="12" fill="#1b1b1d"/>
+  <rect x="9" y="13" width="46" height="38" rx="5" fill="url(#sky)"/>
+  <circle cx="44" cy="24" r="6" fill="#f6e7a8"/>
+  <path d="M9 44 L22 31 L33 41 L41 34 L55 46 L55 46 A5 5 0 0 1 50 51 L14 51 A5 5 0 0 1 9 46 Z"
+        fill="#2f6a52"/>
+  <path d="M9 46 L19 38 L29 46 L40 39 L55 50 A5 5 0 0 1 50 51 L14 51 A5 5 0 0 1 9 46 Z"
+        fill="#4f9a74"/>
+</svg>
