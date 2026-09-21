@@ -74,3 +74,4 @@ plugins/*/build/
 
 # Built Arch packages
 *.pkg.tar.zst
+*.pacman
