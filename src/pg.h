@@ -204,6 +204,31 @@ private:
     Impl* p_ = nullptr;
 };
 
+// ---------------------------------------------------------------- plugins
+// Optional DLLs that teach the viewer a format it does not know, or offer to
+// improve a picture that is already open. Nothing here costs anything until a
+// `plugins` folder actually exists next to the executable.
+struct PluginInfo {
+    wstring  file;              // "upscale.dll" - the key the off-list uses
+    wstring  dir, path;
+    wstring  name, version, author, description;
+    wstring  extensions;        // ".pcx,.ras", for decoders
+    uint32_t caps = 0;          // PV_CAP_* from include/picoview_plugin.h
+    bool     loaded = false;
+    bool     enabled = true;
+    wstring  error;             // why it is not loaded, if it is not
+};
+void pluginsInit(const wstring& disabled);      // comma separated file names
+const std::vector<wstring>& pluginExtensions();
+std::vector<PluginInfo> pluginsAll();
+void pluginsSetEnabled(const wstring& file, bool on);
+bool pluginsEnhanceAvailable();
+wstring pluginsFolder();
+wstring pluginsUserFolder();
+bool pluginDecode(const wstring& path, PixelBuf& out, bool& hasAlpha);
+bool pluginEnhance(const uint8_t* bgra, int w, int h, int stride, int scale,
+                   PixelBuf& out, wstring& usedName);
+
 // ---------------------------------------------------------------- decoding
 void     decodeInit();
 bool     decodeIsSupported(const wstring& ext);
@@ -480,6 +505,25 @@ private:
     Impl* p_ = nullptr;
 };
 
+// How loud a file is overall, in LUFS - the broadcast measure, which is what
+// makes two recordings comparable at all. Measured on a background thread from
+// a sample of the file, so a two-hour film costs about as much as a song.
+class LoudnessScan {
+public:
+    ~LoudnessScan();
+    void    open(const wstring& path);
+    void    close();
+    wstring path() const;
+    bool    ready() const;                       // the measurement is in
+    bool    result(float& lufs, float& peak) const;
+
+private:
+    struct Impl;
+    // Shared with the worker, so closing never has to wait for it: the thread
+    // holds the last reference and lets go when it notices it is not wanted.
+    std::shared_ptr<Impl> p_;
+};
+
 // Decodes single frames for the seek-bar thumbnail, independently of playback.
 class VideoPreview {
 public:
@@ -618,6 +662,11 @@ struct Settings {
     int      lastFit = 0, lastRot = 0, lastFlip = 0;
     bool     alwaysOnTop = false;
     bool     resumeVideo = true;
+    int      volumeStep = 2;       // percent per Ctrl+wheel notch, 1..10
+    bool     loudnessNorm = true;  // pull loud and quiet files to one level
+    int      loudnessTarget = 1;   // 0 = -23, 1 = -19, 2 = -16 LUFS
+    int      procPriority = 1;     // 0 = economy, 1 = normal, 2 = high
+    wstring  pluginsOff;           // file names of the plugins switched off
 
     void load();
     void save() const;
@@ -659,5 +708,6 @@ enum {
     CMD_ESCAPE, CMD_PRINT, CMD_HELP, CMD_ROTATE_SAVE,
     CMD_COMPRESS, CMD_COMP_SAVE, CMD_COMP_SAVEAS, CMD_COMP_BATCH, CMD_COMP_CANCEL,
     CMD_CROP, CMD_CROP_APPLY, CMD_CROP_CANCEL, CMD_CROP_RESET,
-    CMD_CONV_SAVE, CMD_CONV_SAVEAS, CMD_CONV_BATCH, CMD_CONV_CANCEL
+    CMD_CONV_SAVE, CMD_CONV_SAVEAS, CMD_CONV_BATCH, CMD_CONV_CANCEL,
+    CMD_LOUDNESS, CMD_ENHANCE, CMD_PLUGIN_FOLDER
 };

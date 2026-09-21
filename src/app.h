@@ -250,6 +250,10 @@ struct App {
     int      convSrcChannels = 0, convSrcRate = 0, convSrcKbps = 0;
     uint64_t convSrcBytes = 0;
 
+    LoudnessScan  loudness;          // how loud the open file is, overall
+    float         volGain = 1.f;     // levelling gain in force, linear
+    float         volGainWant = 1.f;
+
     AudioEnvelope envelope;          // loudness of the track over time
     BlobRenderer  blob;              // the cover as a ray-marched object
     bool          blobInit = false;
@@ -294,6 +298,9 @@ struct App {
     void applyTheme();
     void applyBackdrop();
     void applyTopmost();
+    void applyPriority();            // how much of the machine this may take
+    void applyVolume();              // the slider, times the levelling gain
+    float loudnessGainDb() const;    // 0 while off or not yet measured
     void storeResume();
     void loadAssociations();
     bool blurActive = false;
@@ -302,6 +309,7 @@ struct App {
     bool titleOverlay() const { return cfg.autoSize == 2 && !fullscreen; }
     // Music plays through the same engine as video; there is simply no picture.
     bool audioOnly() const { return videoMode && !video.hasVideo(); }
+    void enhanceCurrent(int scale);  // hand the picture to a plugin
     void copyToClipboard();
     void deleteCurrent();
     void openFileDialog();

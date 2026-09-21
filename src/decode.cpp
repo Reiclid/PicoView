@@ -433,6 +433,10 @@ void decodeInit() {
             }
         }
     }
+    // Whatever the plugins brought with them. They were loaded before this
+    // ran, or not at all, and either way the list is settled from here on.
+    for (const wstring& e : pluginExtensions()) add(e);
+
     std::sort(g_exts.begin(), g_exts.end());
 }
 
@@ -528,6 +532,8 @@ void runDecodeJob(const DecodeJob& job, DecodeResult& out, const std::atomic<uin
                     out.img = std::move(tmp.img); out.srcW = tmp.srcW; out.srcH = tmp.srcH; out.ok = true;
                 } else if (decodeFallback(data, out.img, out.hasAlpha)) {
                     out.srcW = out.img.w; out.srcH = out.img.h; out.ok = true;
+                } else if (pluginDecode(job.path, out.img, out.hasAlpha)) {
+                    out.srcW = out.img.w; out.srcH = out.img.h; out.ok = true;
                 }
             }
         }
@@ -544,6 +550,8 @@ void runDecodeJob(const DecodeJob& job, DecodeResult& out, const std::atomic<uin
             if (wicDecode(job.path, data, job.targetW, job.targetH, job.wantExif, out) && out.img.valid()) {
                 out.ok = true;
             } else if (decodeFallback(data, out.img, out.hasAlpha)) {
+                out.srcW = out.img.w; out.srcH = out.img.h; out.isFullRes = true; out.ok = true;
+            } else if (pluginDecode(job.path, out.img, out.hasAlpha)) {
                 out.srcW = out.img.w; out.srcH = out.img.h; out.isFullRes = true; out.ok = true;
             } else {
                 out.error = T(L"Формат не підтримується або файл пошкоджено");

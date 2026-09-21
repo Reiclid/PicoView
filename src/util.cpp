@@ -506,6 +506,13 @@ void Settings::load() {
     rememberZoom = iniInt(f, L"RememberZoom", rememberZoom) != 0;
     alwaysOnTop = iniInt(f, L"AlwaysOnTop", alwaysOnTop) != 0;
     resumeVideo = iniInt(f, L"ResumeVideo", resumeVideo) != 0;
+    volumeStep = clampi(iniInt(f, L"VolumeStep", volumeStep), 1, 10);
+    loudnessNorm = iniInt(f, L"LoudnessNorm", loudnessNorm) != 0;
+    loudnessTarget = clampi(iniInt(f, L"LoudnessTarget", loudnessTarget), 0, 2);
+    procPriority = clampi(iniInt(f, L"ProcPriority", procPriority), 0, 2);
+    { wchar_t pb[2048] = {};
+      GetPrivateProfileStringW(L"PicoView", L"PluginsOff", L"", pb, 2048, f.c_str());
+      pluginsOff = pb; }
     { wchar_t ab[4096] = {};
       GetPrivateProfileStringW(L"PicoView", L"Associations", L"", ab, 4096, f.c_str());
       associations = ab; }
@@ -556,6 +563,11 @@ void Settings::save() const {
     put(L"RememberZoom", rememberZoom);
     put(L"AlwaysOnTop", alwaysOnTop);
     put(L"ResumeVideo", resumeVideo);
+    put(L"VolumeStep", volumeStep);
+    put(L"LoudnessNorm", loudnessNorm);
+    put(L"LoudnessTarget", loudnessTarget);
+    put(L"ProcPriority", procPriority);
+    WritePrivateProfileStringW(L"PicoView", L"PluginsOff", pluginsOff.c_str(), f.c_str());
     put(L"Fullscreen", fullscreen);
     put(L"LastZoom", (int)lround(lastZoom * 100.f));
     put(L"LastFit", lastFit);

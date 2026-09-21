@@ -391,7 +391,12 @@ void App::openVideo(const wstring& path) {
                       : video.error());
         return;
     }
-    video.setVolume(cfg.volume / 100.f);
+    // Measured before the level is set, because a file heard once already
+    // answers out of the cache and its correction applies from the first note.
+    loudness.close();
+    if (cfg.loudnessNorm) loudness.open(path);
+    volGain = volGainWant = powf(10.f, loudnessGainDb() / 20.f);
+    video.setVolume(clampf(cfg.volume / 100.f * volGain, 0.f, 1.f));
     video.setMuted(cfg.muted);
 
     pendingResume = -1;
@@ -430,7 +435,10 @@ void App::leaveVideo() {
     previewBmp.Reset();
     previewW = previewH = 0;
     previewAt = previewWant = -1;
-    cfg.volume = clampi((int)lround(video.volume() * 100.f), 0, 100);
+    loudness.close();
+    volGain = volGainWant = 1.f;
+    // The engine's level is the slider times the correction, so reading it back
+    // would write the correction into the setting and make it permanent.
     cfg.muted = video.muted();
     video.close();
     videoMode = false;
@@ -647,6 +655,38 @@ void App::loadAssociations() {
         }
         if (!cur.empty()) assocSel.insert(cur);
     }
+}
+
+// Windows will happily let a viewer fight a compiler for the processor. The
+// economy setting also parks the process in the scheduler's efficiency class,
+// which on a laptop is the difference between warm and hot.
+void App::applyPriority() {
+    DWORD cls = (cfg.procPriority == 0) ? BELOW_NORMAL_PRIORITY_CLASS
+              : (cfg.procPriority == 2) ? ABOVE_NORMAL_PRIORITY_CLASS
+                                        : NORMAL_PRIORITY_CLASS;
+    SetPriorityClass(GetCurrentProcess(), cls);
+
+    PROCESS_POWER_THROTTLING_STATE st{};
+    st.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    st.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+    st.StateMask = (cfg.procPriority == 0) ? PROCESS_POWER_THROTTLING_EXECUTION_SPEED : 0;
+    SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &st, sizeof(st));
+}
+
+void App::applyVolume() {
+    if (!videoMode || !video.isOpen()) return;
+    video.setVolume(clampf(cfg.volume / 100.f * volGain, 0.f, 1.f));
+}
+
+// The correction that would bring this file to the chosen level. Bounded, so a
+// recording measured wrongly - or one that really is near silence - cannot be
+// blown up into distortion.
+float App::loudnessGainDb() const {
+    if (!cfg.loudnessNorm) return 0.f;
+    float lufs = 0, peak = 0;
+    if (!loudness.result(lufs, peak)) return 0.f;
+    static const float kTarget[3] = { -23.f, -19.f, -16.f };
+    return clampf(kTarget[clampi(cfg.loudnessTarget, 0, 2)] - lufs, -18.f, 12.f);
 }
 
 void App::applyTopmost() {
@@ -1386,6 +1426,56 @@ static void orientBuf(PixelBuf& buf, int rot, bool flipH, bool flipV) {
     }
 }
 
+// What is on screen goes to the plugin and what comes back replaces it. The
+// file is never touched: this is a better look at the picture, not an edit.
+void App::enhanceCurrent(int scale) {
+    if (!pluginsEnhanceAvailable()) { showToast(T(L"Немає додатка, який це вміє")); return; }
+    auto pic = current();
+    if (!pic || !pic->bmp || pic->failed) { showToast(T(L"Немає зображення")); return; }
+    if (!gfx.dc) return;
+
+    D2D1_SIZE_U sz = pic->bmp->GetPixelSize();
+    if ((uint64_t)sz.width * sz.height * scale * scale > 400ull * 1000 * 1000) {
+        showToast(T(L"Зображення завелике для цього"));
+        return;
+    }
+
+    // Reading it back off the card is the only way to be sure the plugin sees
+    // exactly what the eye does, rotation and all.
+    D2D1_BITMAP_PROPERTIES1 rp = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.f, 96.f);
+    ComPtr<ID2D1Bitmap1> cpu;
+    if (FAILED(gfx.dc->CreateBitmap(sz, nullptr, 0, rp, &cpu)) || !cpu) return;
+    if (FAILED(cpu->CopyFromBitmap(nullptr, pic->bmp.Get(), nullptr))) return;
+
+    D2D1_MAPPED_RECT mr{};
+    if (FAILED(cpu->Map(D2D1_MAP_OPTIONS_READ, &mr))) return;
+    PixelBuf out;
+    wstring who;
+    double t0 = nowSec();
+    bool ok = pluginEnhance(mr.bits, (int)sz.width, (int)sz.height, (int)mr.pitch, scale, out, who);
+    cpu->Unmap();
+
+    if (!ok || !out.valid()) { showToast(T(L"Додаток не зміг це обробити")); return; }
+    ComPtr<ID2D1Bitmap1> nb = gfx.upload(out);
+    if (!nb) { showToast(T(L"Не вдалося завантажити результат")); return; }
+
+    pgLog("enhance %ux%u -> %dx%d x%d in %.0f ms", sz.width, sz.height, out.w, out.h,
+          scale, (nowSec() - t0) * 1000.0);
+    pic->bmp = nb;
+    pic->w = out.w;
+    pic->h = out.h;
+    pic->preview = false;
+    pic->upgrading = false;
+    wchar_t msg[160];
+    swprintf(msg, 160, T(L"%ls: %d × %d за %.0f мс"), who.c_str(), out.w, out.h,
+             (nowSec() - t0) * 1000.0);
+    showToast(msg, 2.2);
+    applyFit(false);
+    invalidate();
+}
+
 void App::copyToClipboard() {
     wstring p = currentPath();
     if (p.empty()) return;
@@ -1510,13 +1600,15 @@ static void videoStepRate(App& a, int dir, bool wrap) {
     a.invalidate();
 }
 
-static void videoNudgeVolume(App& a, float delta) {
+static void videoNudgeVolume(App& a, int dir) {
     if (!a.videoMode) return;
-    float v = clampf((a.video.muted() ? 0.f : a.video.volume()) + delta, 0.f, 1.f);
-    a.video.setVolume(v);
-    a.video.setMuted(false);
-    a.cfg.volume = clampi((int)lround(v * 100.f), 0, 100);
+    int step = clampi(a.cfg.volumeStep, 1, 10);
+    int from = a.video.muted() ? 0 : a.cfg.volume;
+    a.cfg.volume = clampi(from + dir * step, 0, 100);
     a.cfg.muted = false;
+    a.video.setMuted(false);
+    a.applyVolume();
+    pgLog("volume %d%% (step %d)", a.cfg.volume, step);
     a.showToast(T(L"Гучність ") + std::to_wstring(a.cfg.volume) + L"%", 0.9);
     // Show the flyout too, so the level is visible while it changes.
     a.volPopup = true;
@@ -1585,6 +1677,26 @@ void uiOnCommand(App& a, int cmd) {
                 a.invalidate();
             }
             break;
+        case CMD_LOUDNESS:
+            a.cfg.loudnessNorm = !a.cfg.loudnessNorm;
+            // Turning it on partway through a file has to start the measurement
+            // that opening the file would have started.
+            if (a.cfg.loudnessNorm && a.videoMode && a.loudness.path() != a.currentPath())
+                a.loudness.open(a.currentPath());
+            a.applyVolume();
+            a.cfg.save();
+            a.showToast(a.cfg.loudnessNorm ? T(L"Вирівнювання гучності увімкнено")
+                                           : T(L"Вирівнювання гучності вимкнено"), 1.2);
+            a.requestAnim();
+            a.invalidate();
+            break;
+        case CMD_ENHANCE: a.enhanceCurrent(2); break;
+        case CMD_PLUGIN_FOLDER: {
+            wstring dir = pluginsFolder();
+            CreateDirectoryW(dir.c_str(), nullptr);
+            ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            break;
+        }
         case CMD_SEEK_BACK: if (a.videoMode) { a.videoSeekBy(-5.0); } break;
         case CMD_SEEK_FWD:  if (a.videoMode) { a.videoSeekBy(+5.0); } break;
         case CMD_SPEED:
@@ -1866,6 +1978,26 @@ static void stepAnimations(App& a, double dt) {
         a.needRelayout = true;
     }
 
+    // The levelling gain slides in rather than stepping: the measurement lands
+    // a moment after playback starts, and a jump in level is the very thing
+    // this is here to prevent.
+    if (a.videoMode) {
+        a.volGainWant = powf(10.f, a.loudnessGainDb() / 20.f);
+        if (fabsf(a.volGain - a.volGainWant) > 0.002f) {
+            a.volGain += (a.volGainWant - a.volGain) * (float)(1.0 - pow(0.02, clampf((float)dt, 0.f, 0.1f)));
+            a.applyVolume();
+            a.requestAnim();
+        } else if (a.volGain != a.volGainWant) {
+            a.volGain = a.volGainWant;
+            a.applyVolume();
+            pgLog("levelling %+.1f dB -> engine volume %.3f",
+                  20.0 * log10(std::max(0.01f, a.volGain)), a.video.volume());
+        }
+        // A paused video animates nothing, so the frame the result arrives on
+        // has to be asked for.
+        if (a.cfg.loudnessNorm && !a.loudness.ready()) a.requestAnim();
+    }
+
     // Playback needs a steady stream of repaints to pull frames.
     if (a.videoMode && a.video.playing()) a.requestAnim();
     if (a.convRunning) a.requestAnim();          // the progress bar is moving
@@ -1981,6 +2113,7 @@ static void onKey(App& a, WPARAM key) {
             case 'D': uiOnCommand(a, CMD_OPEN_FOLDER); return;
             case 'N': uiOnCommand(a, CMD_NEWWINDOW); return;
             case 'E': uiOnCommand(a, CMD_COMPRESS); return;
+            case 'U': uiOnCommand(a, CMD_ENHANCE); return;
             case VK_OEM_COMMA: uiOnCommand(a, CMD_SETTINGS); return;
             case VK_OEM_PLUS: case VK_ADD: uiOnCommand(a, CMD_ZOOM_IN); return;
             case VK_OEM_MINUS: case VK_SUBTRACT: uiOnCommand(a, CMD_ZOOM_OUT); return;
@@ -1996,11 +2129,12 @@ static void onKey(App& a, WPARAM key) {
             case VK_RIGHT: a.videoSeekBy(shift ? +30.0 : +5.0); return;
             case VK_UP:
             case VK_DOWN:
-                videoNudgeVolume(a, key == VK_UP ? 0.05f : -0.05f);
+                videoNudgeVolume(a, key == VK_UP ? +1 : -1);
                 return;
             case 'M': uiOnCommand(a, CMD_MUTE);
                       a.showToast(a.video.muted() ? T(L"Звук вимкнено") : T(L"Звук увімкнено"), 0.9);
                       return;
+            case 'L': uiOnCommand(a, CMD_LOUDNESS); return;
             case 'S': uiOnCommand(a, CMD_SPEED); return;
             case VK_PRIOR: a.step(-1); return;
             case VK_NEXT:  a.step(+1); return;
@@ -2079,7 +2213,7 @@ static void onWheel(App& a, int delta, POINT ptClient) {
     // There is nothing to zoom in a video, so the modifier is free here.
     if (a.videoMode && a.view == View::Viewer && ctrl) {
         if (shift) videoStepRate(a, delta > 0 ? +1 : -1, false);
-        else       videoNudgeVolume(a, delta > 0 ? 0.05f : -0.05f);
+        else       videoNudgeVolume(a, delta > 0 ? +1 : -1);
         return;
     }
 
@@ -2525,7 +2659,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         }
     }
 
+    app.applyPriority();       // two calls, before anything expensive starts
     Gfx::warmStart();
+    // Before decodeInit, which asks the plugins what else it can now open.
+    // One directory test when there are none, which is the usual case.
+    pluginsInit(app.cfg.pluginsOff);
     decodeInit();
     app.view = app.cfg.viewMode ? View::Grid : View::Viewer;
     pgLog("t+%.1f decodeInit (%zu ext)", (nowSec() - app.startupAt) * 1000, decodeExtensions().size());

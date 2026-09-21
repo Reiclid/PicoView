@@ -63,6 +63,8 @@ namespace ico {
     static const wchar_t* Reset = L"";
     static const wchar_t* Music = L"";
     static const wchar_t* Convert = L"";
+    static const wchar_t* Levels = L"";
+    static const wchar_t* Plugin = L"";
 }
 
 // --------------------------------------------------------------- frame-local
@@ -503,6 +505,7 @@ static std::vector<MenuEntry> buildActionMenu(App& a, bool forVideo) {
         add(CMD_SPEED, ico::Speed, sp, L"S", fabs(a.video.rate() - 1.0) > 0.01, a.video.isOpen());
         add(CMD_MUTE, a.video.muted() ? ico::Mute : ico::Volume,
             a.video.muted() ? T(L"Увімкнути звук") : T(L"Вимкнути звук"), L"M", a.video.muted());
+        add(CMD_LOUDNESS, ico::Levels, T(L"Вирівнювання гучності"), L"L", a.cfg.loudnessNorm);
         sep();
     }
     add(CMD_GRID, ico::Grid, T(L"Сітка папки"), L"G");
@@ -513,6 +516,8 @@ static std::vector<MenuEntry> buildActionMenu(App& a, bool forVideo) {
     if (!forVideo && a.cropActive) add(CMD_CROP_RESET, ico::Reset, T(L"Скинути обрізання"), nullptr);
     if (forVideo) add(CMD_COMPRESS, ico::Convert, T(L"Конвертувати"), L"Ctrl+E", a.compOpen, has);
     else           add(CMD_COMPRESS, ico::Compress, T(L"Стиснути та конвертувати"), L"Ctrl+E", false, has);
+    if (!forVideo && pluginsEnhanceAvailable())
+        add(CMD_ENHANCE, ico::Plugin, T(L"Покращити зображення"), L"Ctrl+U", false, has);
     if (!forVideo) add(CMD_COPY, ico::Copy, T(L"Копіювати"), L"Ctrl+C", false, has);
     add(CMD_REVEAL, ico::Reveal, T(L"Показати в провіднику"), nullptr);
     add(CMD_NEWWINDOW, ico::NewWindow, T(L"Відкрити нове вікно"), L"Ctrl+N");
@@ -1541,7 +1546,7 @@ static void drawCommandBar(App& a) {
 // The speaker icon follows the level, like the Windows volume flyout.
 static const wchar_t* volumeGlyph(const App& a) {
     if (a.video.muted()) return ico::Mute;
-    float v = a.video.volume();
+    float v = a.cfg.volume / 100.f;
     if (v <= 0.005f) return ico::Vol0;
     if (v < 0.34f)   return ico::Vol1;
     if (v < 0.67f)   return ico::Vol2;
@@ -1766,7 +1771,10 @@ static void drawVideoBar(App& a) {
         rx -= gap;
         return r;
     };
-    float vol = a.video.muted() ? 0.f : a.video.volume();
+    // The slider shows the level that was asked for. What reaches the engine
+    // is that times the levelling correction, which is not the user's setting
+    // and must never be shown as though it were.
+    float vol = a.video.muted() ? 0.f : a.cfg.volume / 100.f;
 
     a.moreMenuAnchor = slot(bs);
     button(a, UI_V_MORE, CMD_MORE, a.moreMenuAnchor, ico::More,
@@ -1793,10 +1801,10 @@ static void drawVideoBar(App& a) {
         float outVol = vol;
         if (slider(a, UI_V_VOL, rectOf(sr.left, cyRow - g.s(7.f), rw(sr), g.s(14.f)),
                    vol, outVol, op, 4.f)) {
-            a.video.setVolume(outVol);
-            a.video.setMuted(false);
             a.cfg.volume = clampi((int)lround(outVol * 100.f), 0, 100);
             a.cfg.muted = false;
+            a.video.setMuted(false);
+            a.applyVolume();
         }
     }
 
@@ -1824,7 +1832,9 @@ static void drawVideoBar(App& a) {
 
     easeTo(a, a.volAnim, (a.volPopup && !onVolInline) ? 1.f : 0.f, 4e-10f, 0.003f);
     if (a.volAnim > 0.003f) {
-        float pw = g.s(46.f), ph = g.s(152.f);
+        float gdb = a.loudnessGainDb();
+        bool  showGain = a.cfg.loudnessNorm && fabsf(gdb) > 0.4f;
+        float pw = g.s(46.f), ph = g.s(showGain ? 170.f : 152.f);
         D2D1_RECT_F pop = rectOf((volBtn.left + volBtn.right) * .5f - pw * .5f,
                                  volBtn.top - ph - g.s(8.f), pw, ph);
         a.volPopupRect = pop;
@@ -1847,15 +1857,26 @@ static void drawVideoBar(App& a) {
                rectOf(pop.left, pop.bottom - capH - g.s(5.f), pw, capH), alpha(a.th.textDim, vop),
                DWRITE_TEXT_ALIGNMENT_CENTER);
 
+        // What the leveller is doing to this file, in the one place where the
+        // number means something: next to the level it is applied to.
+        float gainH = 0.f;
+        if (showGain) {
+            gainH = g.s(18.f);
+            wchar_t gb[24];
+            swprintf(gb, 24, L"%+.0f dB", gdb);
+            g.text(gb, g.fSmall.Get(), rectOf(pop.left, pop.bottom - capH - gainH - g.s(3.f), pw, gainH),
+                   alpha(a.th.accent, vop), DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+
         D2D1_RECT_F track = rectOf((pop.left + pop.right) * .5f - g.s(7.f), pop.top + g.s(13.f),
-                                   g.s(14.f), ph - capH - g.s(26.f));
+                                   g.s(14.f), ph - capH - gainH - g.s(26.f));
         float outVol = vol;
         // On the way out it is only a picture; clicks there belong to the canvas.
         if (vslider(a, UI_V_VOLV, track, vol, outVol, vop, 4.f, a.volPopup)) {
-            a.video.setVolume(outVol);
-            a.video.setMuted(false);
             a.cfg.volume = clampi((int)lround(outVol * 100.f), 0, 100);
             a.cfg.muted = false;
+            a.video.setMuted(false);
+            a.applyVolume();
         }
         if (anim) g.dc->SetTransform(D2D1::Matrix3x2F::Identity());
     }
@@ -2136,7 +2157,11 @@ static void drawInfoPanel(App& a) {
     g.dc->FillRectangle(rectOf(p.left, p.top, g.s(1.f), rh(p)), g.solid(a.th.stroke));
 
     float pad = g.s(18.f);
-    float y = p.top + g.s(18.f);
+    // Where the title bar floats over the picture the panel still reaches the
+    // top of the window - it is a surface, and a notch cut out of it would look
+    // like a mistake - but its heading starts below the window buttons, which
+    // is where it used to collide with them.
+    float y = p.top + (a.titleOverlay() ? g.s(40.f) : 0.f) + g.s(18.f);
     g.text(T(L"Відомості"), g.fBodyStrong.Get(), rectOf(p.left + pad, y, rw(p) - pad * 2 - g.s(34.f), g.s(24.f)), a.th.text);
     button(a, UI_INFO_CLOSE, CMD_INFO, rectOf(p.right - pad - g.s(28.f), y - g.s(2.f), g.s(28.f), g.s(28.f)), ico::Close, T(L"Закрити"));
     y += g.s(36.f);
@@ -3008,9 +3033,10 @@ static void drawSettings(App& a) {
     g.dc->FillRectangle(rectOf(card.left, card.top + hdr, w, g.s(1.f)), g.solid(a.th.stroke));
 
     // ---------------- navigation rail
-    const wchar_t* navIcons[] = { L"\uE790", L"\uE71E", L"\uE714", L"\uE737", L"\uE8B7" };
-    const wchar_t* navNames[] = { T(L"Вигляд"), T(L"Перегляд"), T(L"Відео"), T(L"Вікна"), T(L"Формати") };
-    const int navCount = 5;
+    const wchar_t* navIcons[] = { L"\uE790", L"\uE71E", L"\uE714", L"\uE737", L"\uE8B7", ico::Plugin };
+    const wchar_t* navNames[] = { T(L"Вигляд"), T(L"Перегляд"), T(L"Відео"), T(L"Вікна"),
+                                  T(L"Формати"), T(L"Додатки") };
+    const int navCount = 6;
 
     float navTop = card.top + hdr + g.s(1.f);
     float railW = narrow ? 0.f : g.s(186.f);
@@ -3205,11 +3231,57 @@ static void drawSettings(App& a) {
         if (slider(a, UI_SET_BASE + 120, rectOf(cr.left, cr.top + rowH * .5f - g.s(7.f), rw(cr) - g.s(52.f), g.s(14.f)),
                    v, outv, 1.f, 4.f)) {
             a.cfg.volume = clampi((int)lround(outv * 100.f), 0, 100);
-            if (a.videoMode) { a.video.setVolume(a.cfg.volume / 100.f); a.video.setMuted(false); a.cfg.muted = false; }
+            a.cfg.muted = false;
+            if (a.videoMode) { a.video.setMuted(false); a.applyVolume(); }
             touched();
         }
         g.text(std::to_wstring(a.cfg.volume) + L"%", g.fCaption.Get(),
                rectOf(cr.right - g.s(46.f), cr.top, g.s(46.f), rowH), a.th.textDim, DWRITE_TEXT_ALIGNMENT_TRAILING);
+
+        D2D1_RECT_F wr = setLabel(s, T(L"Крок гучності колесом"), T(L"Ctrl + колесо миші"), rowH2);
+        float wv = (a.cfg.volumeStep - 1) / 9.f, woutv = wv;
+        if (slider(a, UI_SET_BASE + 122,
+                   rectOf(wr.left, wr.top + rowH2 * .5f - g.s(7.f), rw(wr) - g.s(52.f), g.s(14.f)),
+                   wv, woutv, 1.f, 4.f)) {
+            a.cfg.volumeStep = clampi(1 + (int)lround(woutv * 9.f), 1, 10);
+            touched();
+        }
+        g.text(std::to_wstring(a.cfg.volumeStep) + L"%", g.fCaption.Get(),
+               rectOf(wr.right - g.s(46.f), wr.top, g.s(46.f), rowH2),
+               a.th.textDim, DWRITE_TEXT_ALIGNMENT_TRAILING);
+
+        if (toggleSwitch(a, UI_SET_BASE + 124,
+                         setLabel(s, T(L"Вирівнювання гучності"),
+                                  T(L"Тихі й гучні файли звучать однаково гучно"), rowH2),
+                         a.cfg.loudnessNorm)) {
+            a.cfg.loudnessNorm = !a.cfg.loudnessNorm;
+            if (a.cfg.loudnessNorm && a.videoMode && a.loudness.path() != a.currentPath())
+                a.loudness.open(a.currentPath());
+            a.applyVolume();
+            a.requestAnim();
+            touched();
+        }
+        if (a.cfg.loudnessNorm) {
+            const wchar_t* lv[] = { T(L"Тихо"), T(L"Помірно"), T(L"Гучно") };
+            int lp = segmented(a, UI_SET_BASE + 126,
+                               setLabel(s, T(L"Цільовий рівень"), L"-23 / -19 / -16 LUFS", rowH2),
+                               lv, 3, a.cfg.loudnessTarget);
+            if (lp >= 0) { a.cfg.loudnessTarget = lp; a.applyVolume(); a.requestAnim(); touched(); }
+
+            // Measured, not promised: whatever is playing right now, and what
+            // is being done to it.
+            float lufs = 0, pk = 0;
+            wstring line;
+            if (!a.videoMode) line = T(L"Нічого не відтворюється");
+            else if (a.loudness.result(lufs, pk)) {
+                wchar_t lb[96];
+                swprintf(lb, 96, T(L"Цей файл: %.1f LUFS, поправка %+.1f дБ"), lufs, a.loudnessGainDb());
+                line = lb;
+            } else if (!a.loudness.ready()) line = T(L"Вимірювання…");
+            else line = T(L"Не вдалося виміряти цей файл");
+            g.text(line, g.fSmall.Get(), rectOf(inner.left, s.y, rw(inner), g.s(18.f)), a.th.textMute);
+            s.y += g.s(24.f);
+        }
         break;
     }
     case 3: {   // ------------------------------------------------ windows
@@ -3229,10 +3301,85 @@ static void drawSettings(App& a) {
             touched();
         }
 
+        {
+            const wchar_t* pr[] = { T(L"Економний"), T(L"Звичайний"), T(L"Високий") };
+            int pp = segmented(a, UI_SET_BASE + 137,
+                               setLabel(s, T(L"Пріоритет програми"),
+                                        T(L"Скільки процесора вона може забирати в інших"), rowH2),
+                               pr, 3, a.cfg.procPriority);
+            if (pp >= 0) { a.cfg.procPriority = pp; a.applyPriority(); touched(); }
+        }
+
         D2D1_RECT_F cr = setLabel(s, T(L"Відкрити ще одне вікно"), L"Ctrl+N", rowH2);
         textButton(a, UI_SET_BASE + 140, CMD_NEWWINDOW,
                    rectOf(cr.right - g.s(150.f), cr.top + g.s(8.f), g.s(150.f), g.s(32.f)),
                    T(L"Нове вікно"), nullptr, { false, true, false, false, 5.f });
+        break;
+    }
+    case 5: {   // ------------------------------------------------ plugins
+        const wchar_t* note[] = {
+            T(L"Додатки - це звичайні DLL, які вчать програму новим форматам"),
+            T(L"або вміють покращувати зображення. Покладіть їх у папку plugins"),
+            T(L"поруч із PicoView.exe і перезапустіть програму."),
+        };
+        for (int i = 0; i < 3; ++i) {
+            g.text(note[i], g.fSmall.Get(), rectOf(inner.left, s.y, rw(inner), g.s(17.f)),
+                   i == 0 ? a.th.textDim : a.th.textMute);
+            s.y += g.s(17.f);
+        }
+        s.y += g.s(10.f);
+        textButton(a, UI_SET_BASE + 200, CMD_PLUGIN_FOLDER,
+                   rectOf(inner.left, s.y, g.s(210.f), g.s(32.f)),
+                   T(L"Відкрити папку додатків"), nullptr, { false, true, false, false, 5.f });
+        s.y += g.s(46.f);
+
+        std::vector<PluginInfo> ps = pluginsAll();
+        if (ps.empty()) {
+            g.text(T(L"Поки що жодного додатка не знайдено"), g.fBody.Get(),
+                   rectOf(inner.left, s.y, rw(inner), g.s(22.f)), a.th.textDim);
+            s.y += g.s(30.f);
+            break;
+        }
+
+        for (size_t i = 0; i < ps.size(); ++i) {
+            const PluginInfo& pi = ps[i];
+            // What it is, then what it can actually do, then the switch. One
+            // that failed says so in place of its description: a row that
+            // looks fine but does nothing is worse than no row.
+            wstring sub;
+            if (!pi.loaded && !pi.enabled) sub = T(L"Вимкнено");
+            else if (!pi.error.empty())    sub = pi.error;
+            else {
+                sub = pi.description;
+                wstring caps;
+                if (pi.caps & 1u)
+                    caps += wstring(T(L"формати")) +
+                            (pi.extensions.empty() ? wstring() : L": " + pi.extensions);
+                if (pi.caps & 2u) { if (!caps.empty()) caps += L"  -  "; caps += T(L"покращення"); }
+                if (!caps.empty()) sub = sub.empty() ? caps : sub + L"  -  " + caps;
+            }
+            wstring title = pi.name;
+            if (!pi.version.empty()) title += L"  " + pi.version;
+
+            D2D1_RECT_F pr = setLabel(s, title.c_str(), sub.c_str(), rowH2);
+            bool on = pi.enabled;
+            if (toggleSwitch(a, UI_SET_BASE + 210 + (int)i * 2, pr, on)) {
+                pluginsSetEnabled(pi.file, !on);
+                // The off-list is what survives a restart; the live state has
+                // already changed above.
+                wstring off;
+                for (const auto& q : pluginsAll())
+                    if (!q.enabled) { if (!off.empty()) off += L","; off += q.file; }
+                a.cfg.pluginsOff = off;
+                a.cfg.save();
+                a.settingsDirty = false;
+                a.showToast(T(L"Зміни в списку форматів діятимуть після перезапуску"), 2.4);
+                a.invalidate();
+            }
+            g.text(pi.file, g.fSmall.Get(),
+                   rectOf(inner.left, s.y - g.s(4.f), rw(inner), g.s(16.f)), a.th.textMute);
+            s.y += g.s(20.f);
+        }
         break;
     }
     default: {  // ------------------------------------------------ file types
