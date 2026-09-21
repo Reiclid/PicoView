@@ -1,0 +1,34 @@
+# Maintainer: Reiclid <reiclid@gmail.com>
+#
+# Builds the Wayland front end of PicoView. This is stage one: pictures,
+# folder navigation, zoom, pan, full screen, and the generated artwork for a
+# music file. No video and no text on screen yet - see docs/linux-port.md.
+#
+# From a checkout:   makepkg -si
+# From the AUR-style source line below, drop the `pkgver`/`source` pair in and
+# remove the local-directory build.
+
+pkgname=picoview
+pkgver=1.3.0
+pkgrel=1
+pkgdesc="Fast, small image viewer for Wayland"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Reiclid/PicoView"
+license=('MIT')
+depends=('wayland' 'libxkbcommon' 'gcc-libs')
+makedepends=('meson' 'ninja' 'wayland-protocols' 'pkgconf')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$srcdir/PicoView-$pkgver"
+  arch-meson linux build
+  meson compile -C build
+}
+
+package() {
+  cd "$srcdir/PicoView-$pkgver"
+  meson install -C build --destdir "$pkgdir"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE" 2>/dev/null || true
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

@@ -13,58 +13,12 @@
 // fraction of a second, which is what keeps this honest about being free.
 #include "pg.h"
 
+#include "core/loudness_math.h"
+
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <mferror.h>
-
-// ------------------------------------------------------------------ filters
-// The two stages of K-weighting: a high shelf for the head's own resonance and
-// a high-pass that takes out what the ear barely registers. Both are given as
-// analogue prototypes in the standard; these are the bilinear transforms of
-// them, so they are right at any sample rate rather than only at 48 kHz.
-struct Biquad {
-    double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
-    double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
-
-    void reset() { x1 = x2 = y1 = y2 = 0; }
-    double run(double x) {
-        double y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
-        x2 = x1; x1 = x; y2 = y1; y1 = y;
-        return y;
-    }
-};
-
-static Biquad kShelf(double fs) {
-    const double f0 = 1681.974450955533;
-    const double G = 3.999843853973347;      // dB
-    const double Q = 0.7071752369554196;
-    double K = tan(3.14159265358979 * f0 / fs);
-    double Vh = pow(10.0, G / 20.0);
-    double Vb = pow(Vh, 0.4996667741545416);
-    double a0 = 1.0 + K / Q + K * K;
-    Biquad q;
-    q.b0 = (Vh + Vb * K / Q + K * K) / a0;
-    q.b1 = 2.0 * (K * K - Vh) / a0;
-    q.b2 = (Vh - Vb * K / Q + K * K) / a0;
-    q.a1 = 2.0 * (K * K - 1.0) / a0;
-    q.a2 = (1.0 - K / Q + K * K) / a0;
-    return q;
-}
-
-static Biquad kHighpass(double fs) {
-    const double f0 = 38.13547087602444;
-    const double Q = 0.5003270373238773;
-    double K = tan(3.14159265358979 * f0 / fs);
-    double a0 = 1.0 + K / Q + K * K;
-    Biquad q;
-    q.b0 = 1.0;
-    q.b1 = -2.0;
-    q.b2 = 1.0;
-    q.a1 = 2.0 * (K * K - 1.0) / a0;
-    q.a2 = (1.0 - K / Q + K * K) / a0;
-    return q;
-}
 
 // ------------------------------------------------------------------ cache
 // Measuring the same file twice in one session would be wasted work; a track
@@ -121,28 +75,6 @@ bool LoudnessScan::result(float& lufs, float& peak) const {
     lufs = p_->lufs.load();
     peak = p_->peak.load();
     return true;
-}
-
-// Gated mean of the block energies, per BS.1770-4: silence is dropped outright,
-// then anything more than 10 dB below the rest is dropped as well, so a film's
-// dialogue sets the level and its quiet passages do not drag it down.
-static float gatedLoudness(std::vector<double>& z) {
-    if (z.empty()) return -70.f;
-    auto loud = [](double e) { return -0.691 + 10.0 * log10(std::max(1e-12, e)); };
-
-    double sum = 0;
-    int    n = 0;
-    for (double e : z)
-        if (loud(e) > -70.0) { sum += e; ++n; }
-    if (!n) return -70.f;
-
-    double rel = loud(sum / n) - 10.0;
-    double sum2 = 0;
-    int    n2 = 0;
-    for (double e : z)
-        if (loud(e) > -70.0 && loud(e) > rel) { sum2 += e; ++n2; }
-    if (!n2) return (float)loud(sum / n);
-    return (float)loud(sum2 / n2);
 }
 
 void LoudnessScan::open(const wstring& path) {
@@ -214,7 +146,8 @@ void LoudnessScan::open(const wstring& path) {
                     wins.push_back({ durSec * (0.03 + 0.94 * i / (double)(kN - 1)), 1.6 });
             }
 
-            std::vector<Biquad> sh(ch, kShelf(rate)), hp(ch, kHighpass(rate));
+            std::vector<pv::Biquad> sh(ch, pv::kWeightShelf(rate)),
+                                hp(ch, pv::kWeightHighpass(rate));
             std::vector<double> z;                   // one energy per block
             std::vector<double> acc(ch, 0.0);        // running square sum per channel
             float  peak = 0.f;
@@ -293,7 +226,7 @@ void LoudnessScan::open(const wstring& path) {
             }
 
             if (!z.empty()) {
-                float l = gatedLoudness(z);
+                float l = pv::gatedLoudnessLufs(z);
                 p->lufs.store(l);
                 p->peak.store(peak);
                 p->ok.store(true);

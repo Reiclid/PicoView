@@ -60,6 +60,7 @@ cl %CFLAGS% /Fo:build\ /Fd:build\ src\main.cpp src\ui.cpp src\gfx.cpp src\decode
    src\loader.cpp src\util.cpp src\video.cpp src\lang.cpp src\encode.cpp ^
    src\convert.cpp src\envelope.cpp src\loudness.cpp src\coverart.cpp src\blob.cpp ^
    src\plugins.cpp src\store.cpp ^
+   src\core\coverplan.cpp src\core\loudness_math.cpp ^
    build\app.res /Fe:PicoView.exe %LFLAGS% %LIBS% || exit /b 1
 
 echo.
