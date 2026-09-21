@@ -505,9 +505,10 @@ meson setup build linux && meson compile -C build
 (поки все композиться на процесорі в `wl_shm`), відео і звуку (це libmpv).
 Залежності — лише `wayland-client` і `libxkbcommon`.
 
-Збирав і перевіряв цю частину не автор Windows-коду: на машині, де вона
-писалася, немає ні компілятора під Linux, ні композитора. Докладний стан і
-план далі — [docs/linux-port.md](docs/linux-port.md).
+Зібрано GCC 13.3 під Ubuntu 24.04 і запущено під WSLg. **Hyprland не
+перевірявся** — WSLg це Weston, і рамки з повноекранним режимом там інші.
+Докладний стан, план далі й опис бага, який знайшов другий компілятор, —
+[docs/linux-port.md](docs/linux-port.md).
 
 ---
 
