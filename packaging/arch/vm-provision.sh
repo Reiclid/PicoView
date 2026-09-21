@@ -20,6 +20,9 @@ DISK=${DISK:-/dev/sda}
 USERNAME=${USERNAME:-dev}
 PASSWORD=${PASSWORD:-dev}
 HOSTNAME=${HOSTNAME:-picoview-vm}
+# Pass AUTHKEY='ssh-ed25519 ...' and that key can log in straight away, which
+# is what makes the rest of the work possible without typing into a console.
+AUTHKEY=${AUTHKEY:-}
 
 say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
@@ -225,6 +228,12 @@ cc -O2 -o /tmp/mkpics mkpics.c -lm
 ls -l ~/pics
 MK
 chmod +x /mnt/home/$USERNAME/mkpics.sh
+
+if [[ -n $AUTHKEY ]]; then
+    install -d -m 700 /mnt/home/$USERNAME/.ssh
+    echo "$AUTHKEY" > /mnt/home/$USERNAME/.ssh/authorized_keys
+    chmod 600 /mnt/home/$USERNAME/.ssh/authorized_keys
+fi
 
 arch-chroot /mnt chown -R $USERNAME:$USERNAME /home/$USERNAME
 
