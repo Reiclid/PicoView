@@ -1998,6 +1998,10 @@ static void stepAnimations(App& a, double dt) {
         if (a.cfg.loudnessNorm && !a.loudness.ready()) a.requestAnim();
     }
 
+    // A plugin that runs in the background is started and stopped here, so it
+    // always happens on the thread that owns the window.
+    pluginsTickServices();
+
     // Playback needs a steady stream of repaints to pull frames.
     if (a.videoMode && a.video.playing()) a.requestAnim();
     if (a.convRunning) a.requestAnim();          // the progress bar is moving

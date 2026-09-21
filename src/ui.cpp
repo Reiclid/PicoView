@@ -3317,10 +3317,14 @@ static void drawSettings(App& a) {
         break;
     }
     case 5: {   // ------------------------------------------------ plugins
+        // Opening the page is what fetches the catalogue. A session that never
+        // comes here never touches the network, and never even maps winhttp.
+        pluginStoreRefresh(false);
+
         const wchar_t* note[] = {
-            T(L"Додатки - це звичайні DLL, які вчать програму новим форматам"),
-            T(L"або вміють покращувати зображення. Покладіть їх у папку plugins"),
-            T(L"поруч із PicoView.exe і перезапустіть програму."),
+            T(L"Додатки - це звичайні DLL. Нижче ті, що публікує проєкт:"),
+            T(L"натисніть «Встановити», і файл завантажиться просто зараз."),
+            T(L"Свої можна класти в папку додатків вручну."),
         };
         for (int i = 0; i < 3; ++i) {
             g.text(note[i], g.fSmall.Get(), rectOf(inner.left, s.y, rw(inner), g.s(17.f)),
@@ -3329,18 +3333,27 @@ static void drawSettings(App& a) {
         }
         s.y += g.s(10.f);
         textButton(a, UI_SET_BASE + 200, CMD_PLUGIN_FOLDER,
-                   rectOf(inner.left, s.y, g.s(210.f), g.s(32.f)),
-                   T(L"Відкрити папку додатків"), nullptr, { false, true, false, false, 5.f });
+                   rectOf(inner.left, s.y, g.s(200.f), g.s(32.f)),
+                   T(L"Папка додатків"), nullptr, { false, true, false, false, 5.f });
+        if (textButton(a, UI_SET_BASE + 202, CMD_NONE,
+                       rectOf(inner.left + g.s(208.f), s.y, g.s(150.f), g.s(32.f)),
+                       T(L"Оновити список"), pluginStoreSource().c_str(),
+                       { false, true, false, false, 5.f })) {
+            pluginStoreRefresh(true);
+        }
         s.y += g.s(46.f);
 
+        // ---------------- what is already here
         std::vector<PluginInfo> ps = pluginsAll();
+        g.text(T(L"Встановлені"), g.fBodyStrong.Get(),
+               rectOf(inner.left, s.y, rw(inner), g.s(22.f)), a.th.accent);
+        s.y += g.s(28.f);
+
         if (ps.empty()) {
-            g.text(T(L"Поки що жодного додатка не знайдено"), g.fBody.Get(),
+            g.text(T(L"Поки що жодного"), g.fBody.Get(),
                    rectOf(inner.left, s.y, rw(inner), g.s(22.f)), a.th.textDim);
             s.y += g.s(30.f);
-            break;
         }
-
         for (size_t i = 0; i < ps.size(); ++i) {
             const PluginInfo& pi = ps[i];
             // What it is, then what it can actually do, then the switch. One
@@ -3356,6 +3369,7 @@ static void drawSettings(App& a) {
                     caps += wstring(T(L"формати")) +
                             (pi.extensions.empty() ? wstring() : L": " + pi.extensions);
                 if (pi.caps & 2u) { if (!caps.empty()) caps += L"  -  "; caps += T(L"покращення"); }
+                if (pi.caps & 4u) { if (!caps.empty()) caps += L"  -  "; caps += T(L"фонова служба"); }
                 if (!caps.empty()) sub = sub.empty() ? caps : sub + L"  -  " + caps;
             }
             wstring title = pi.name;
@@ -3379,6 +3393,82 @@ static void drawSettings(App& a) {
             g.text(pi.file, g.fSmall.Get(),
                    rectOf(inner.left, s.y - g.s(4.f), rw(inner), g.s(16.f)), a.th.textMute);
             s.y += g.s(20.f);
+        }
+
+        // ---------------- what the project publishes
+        s.y += g.s(12.f);
+        g.text(T(L"Доступні"), g.fBodyStrong.Get(),
+               rectOf(inner.left, s.y, rw(inner), g.s(22.f)), a.th.accent);
+        s.y += g.s(28.f);
+
+        int st = pluginStoreState();
+        if (st == 1) {
+            g.text(T(L"Завантаження списку…"), g.fBody.Get(),
+                   rectOf(inner.left, s.y, rw(inner), g.s(22.f)), a.th.textDim);
+            s.y += g.s(30.f);
+            a.requestAnim();
+        } else if (st == 3) {
+            g.text(pluginStoreError(), g.fBody.Get(),
+                   rectOf(inner.left, s.y, rw(inner), g.s(22.f)), a.th.textDim);
+            s.y += g.s(30.f);
+        }
+
+        std::vector<StoreItem> items = pluginStoreItems();
+        for (size_t i = 0; i < items.size(); ++i) {
+            const StoreItem& si = items[i];
+            bool here = pluginsHave(si.file);
+
+            wstring sub = si.description;
+            if (!si.extensions.empty()) {
+                if (!sub.empty()) sub += L"  -  ";
+                sub += si.extensions;
+            }
+            if (si.status == 3 && !si.error.empty()) sub = si.error;
+
+            wstring title = si.name;
+            if (!si.version.empty()) title += L"  " + si.version;
+
+            D2D1_RECT_F rr = setLabel(s, title.c_str(), sub.c_str(), rowH2);
+            float bw = g.s(130.f), bh = g.s(30.f);
+            D2D1_RECT_F br = rectOf(rr.right - bw, rr.top + (rowH2 - bh) * .5f, bw, bh);
+
+            if (si.status == 1) {
+                // A number that moves beats a bar that might not.
+                wchar_t pb[48];
+                if (si.bytes > 0)
+                    swprintf(pb, 48, L"%d%%", clampi(si.got * 100 / std::max(1, si.bytes), 0, 100));
+                else
+                    swprintf(pb, 48, L"%d КБ", si.got / 1024);
+                g.text(pb, g.fBody.Get(), br, a.th.accent, DWRITE_TEXT_ALIGNMENT_CENTER);
+                a.requestAnim();
+            } else if (here) {
+                if (textButton(a, UI_SET_BASE + 260 + (int)i * 2, CMD_NONE, br,
+                               T(L"Видалити"), nullptr, { false, true, false, false, 5.f })) {
+                    pluginStoreRemove(si.id);
+                    a.showToast(T(L"Видалено. Формати оновляться після перезапуску"), 2.4);
+                    a.invalidate();
+                }
+            } else {
+                bool busy = pluginStoreBusy();
+                if (textButton(a, UI_SET_BASE + 261 + (int)i * 2, CMD_NONE, br,
+                               T(L"Встановити"), nullptr,
+                               { false, !busy, false, true, 5.f }) && !busy) {
+                    pluginStoreInstall(si.id);
+                    a.requestAnim();
+                }
+            }
+            wchar_t meta[96];
+            swprintf(meta, 96, L"%ls  ·  %ls", si.file.c_str(),
+                     humanSize((uint64_t)si.bytes).c_str());
+            g.text(meta, g.fSmall.Get(),
+                   rectOf(inner.left, s.y - g.s(4.f), rw(inner), g.s(16.f)), a.th.textMute);
+            s.y += g.s(20.f);
+        }
+        if (!items.empty()) {
+            s.y += g.s(6.f);
+            g.text(T(L"Файли перевіряються за SHA-256 із каталогу проєкту."), g.fSmall.Get(),
+                   rectOf(inner.left, s.y, rw(inner), g.s(17.f)), a.th.textMute);
+            s.y += g.s(22.f);
         }
         break;
     }

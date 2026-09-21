@@ -1,0 +1,31 @@
+{
+    "version":  1,
+    "plugins":  [
+                    {
+                        "id":  "upscale",
+                        "file":  "upscale.dll",
+                        "name":  "Приклад: PCX і збільшення",
+                        "author":  "PicoView",
+                        "version":  "1.0",
+                        "description":  "Збільшує вдвічі й підвищує різкість",
+                        "extensions":  ".pcx",
+                        "platform":  "win-x64",
+                        "size":  109568,
+                        "sha256":  "e1087cad1fed843ace9f77012e8329aaa79441746e650b52c396f8feb2ed0106",
+                        "url":  "https://raw.githubusercontent.com/Reiclid/PicoView/main/plugins/dist/win-x64/upscale.dll"
+                    },
+                    {
+                        "id":  "hoverpeek",
+                        "file":  "hoverpeek.dll",
+                        "name":  "Предперегляд у Провіднику",
+                        "author":  "PicoView",
+                        "version":  "1.0",
+                        "description":  "Наведіть на файл у Провіднику - зʼявиться картка з ним",
+                        "extensions":  "",
+                        "platform":  "win-x64",
+                        "size":  146432,
+                        "sha256":  "6816eedc317e8e34bd6c533cb5a623628b2bddc7c05969d87645bf1bdaca6873",
+                        "url":  "https://raw.githubusercontent.com/Reiclid/PicoView/main/plugins/dist/win-x64/hoverpeek.dll"
+                    }
+                ]
+}

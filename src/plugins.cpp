@@ -51,6 +51,15 @@ void callShutdown(const PvPlugin* api) {
     __try { api->shutdown(); }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
+int callServiceStart(const PvPlugin* api) {
+    __try { return api->service_start(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+void callServiceStop(const PvPlugin* api) {
+    if (!api->service_stop) return;
+    __try { api->service_stop(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
 size_t safeLen(const wchar_t* s, size_t cap) {
     if (!s) return 0;
     __try {
@@ -74,6 +83,7 @@ struct Loaded {
     HMODULE    mod = nullptr;
     PvPlugin   api{};
     bool       broken = false;      // it faulted once; never called again
+    bool       running = false;     // its background service is up
 };
 
 std::vector<Loaded>  g_plugins;
@@ -81,6 +91,7 @@ std::vector<wstring> g_exts;
 std::mutex           g_call;        // plugins are not assumed to be re-entrant
 bool                 g_scanned = false;
 bool                 g_anyEnhance = false;
+std::atomic<bool>    g_servicesDirty{ false };
 DWORD                g_uiThread = 0;
 wstring              g_userDir;
 
@@ -133,6 +144,16 @@ void splitExts(const wstring& list, std::vector<wstring>& out) {
             }
         } else cur += c;
     }
+}
+
+// Services are started from here rather than from wherever a plugin happened
+// to be loaded: a plugin that puts up a window must do it on the thread that
+// owns the interface, and a download finishes on a worker.
+void stopService(Loaded& p) {
+    if (!p.running) return;
+    p.running = false;
+    callServiceStop(&p.api);
+    pgLog("plugin service stopped: %s", u8(p.info.name).c_str());
 }
 
 void rebuildTables() {
@@ -201,6 +222,11 @@ void loadOne(const wstring& dir, const wstring& file, const wstring& disabled) {
     if ((api.caps & PV_CAP_DECODE) && api.decode) L.info.extensions = safeStr(api.extensions, 1024);
     if (!api.enhance) L.info.caps &= ~(uint32_t)PV_CAP_ENHANCE;
     if (!api.decode) L.info.caps &= ~(uint32_t)PV_CAP_DECODE;
+    // Fields past `shutdown` only exist in plugins built against a header that
+    // has them, so the size it reported is what says whether they are there.
+    bool hasService = api.size >= (uint32_t)(offsetof(PvPlugin, service_stop) + sizeof(void*));
+    if (!hasService || !api.service_start) L.info.caps &= ~(uint32_t)PV_CAP_SERVICE;
+    if (L.info.caps & PV_CAP_SERVICE) g_servicesDirty.store(true);
 
     pgLog("plugin loaded '%s' v%s caps=%u ext=%s", u8(L.info.name).c_str(),
           u8(L.info.version).c_str(), L.info.caps, u8(L.info.extensions).c_str());
@@ -253,6 +279,32 @@ void pluginsInit(const wstring& disabled) {
     rebuildTables();
 }
 
+// Called every frame from the interface thread, and does nothing at all
+// unless something actually changed - which is what makes it safe to put in
+// the frame loop of a program that measures its startup in milliseconds.
+void pluginsTickServices() {
+    if (!g_servicesDirty.exchange(false)) return;
+    std::lock_guard<std::mutex> lk(g_call);
+    g_uiThread = GetCurrentThreadId();
+    for (auto& p : g_plugins) {
+        bool want = p.info.loaded && p.info.enabled && !p.broken &&
+                    (p.info.caps & PV_CAP_SERVICE) != 0;
+        if (want && !p.running) {
+            int rc = callServiceStart(&p.api);
+            if (rc == PV_OK) {
+                p.running = true;
+                pgLog("plugin service started: %s", u8(p.info.name).c_str());
+            } else {
+                if (rc == -1) p.broken = true;
+                p.info.error = T(L"Службу не вдалося запустити");
+                pgLog("plugin service failed to start: %s rc=%d", u8(p.info.name).c_str(), rc);
+            }
+        } else if (!want && p.running) {
+            stopService(p);
+        }
+    }
+}
+
 const std::vector<wstring>& pluginExtensions() { return g_exts; }
 bool pluginsEnhanceAvailable() { return g_anyEnhance; }
 wstring pluginsFolder() { return joinPath(exeDir(), L"plugins"); }
@@ -274,6 +326,7 @@ void pluginsSetEnabled(const wstring& file, bool on) {
     for (size_t i = 0; i < g_plugins.size(); ++i) {
         if (_wcsicmp(g_plugins[i].info.file.c_str(), file.c_str()) != 0) continue;
         wstring dir = g_plugins[i].info.dir;
+        stopService(g_plugins[i]);
         if (g_plugins[i].mod) {
             callShutdown(&g_plugins[i].api);
             FreeLibrary(g_plugins[i].mod);
@@ -283,6 +336,49 @@ void pluginsSetEnabled(const wstring& file, bool on) {
         rebuildTables();
         return;
     }
+}
+
+// A plugin that was not there when the program started - just downloaded, or
+// dropped into the folder by hand. Everything works from here except the list
+// of file extensions, which is settled once at startup on purpose.
+void pluginsAdopt(const wstring& dir, const wstring& file) {
+    std::lock_guard<std::mutex> lk(g_call);
+    if (!g_uiThread) g_uiThread = GetCurrentThreadId();
+    for (size_t i = 0; i < g_plugins.size(); ++i)
+        if (_wcsicmp(g_plugins[i].info.file.c_str(), file.c_str()) == 0) {
+            stopService(g_plugins[i]);
+            if (g_plugins[i].mod) {
+                callShutdown(&g_plugins[i].api);
+                FreeLibrary(g_plugins[i].mod);
+            }
+            g_plugins.erase(g_plugins.begin() + i);
+            break;
+        }
+    loadOne(dir, file, wstring());
+    rebuildTables();
+    g_servicesDirty.store(true);
+}
+
+void pluginsForget(const wstring& file) {
+    std::lock_guard<std::mutex> lk(g_call);
+    for (size_t i = 0; i < g_plugins.size(); ++i) {
+        if (_wcsicmp(g_plugins[i].info.file.c_str(), file.c_str()) != 0) continue;
+        stopService(g_plugins[i]);
+        if (g_plugins[i].mod) {
+            callShutdown(&g_plugins[i].api);
+            FreeLibrary(g_plugins[i].mod);
+        }
+        g_plugins.erase(g_plugins.begin() + i);
+        rebuildTables();
+        return;
+    }
+}
+
+bool pluginsHave(const wstring& file) {
+    std::lock_guard<std::mutex> lk(g_call);
+    for (const auto& p : g_plugins)
+        if (_wcsicmp(p.info.file.c_str(), file.c_str()) == 0) return true;
+    return false;
 }
 
 bool pluginDecode(const wstring& path, PixelBuf& out, bool& hasAlpha) {

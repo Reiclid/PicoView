@@ -41,6 +41,7 @@ extern "C" {
 /* What a plugin is offering to do. */
 #define PV_CAP_DECODE  (1u << 0)   /* turn a file PicoView cannot read into pixels */
 #define PV_CAP_ENHANCE (1u << 1)   /* sharpen or enlarge an image already open */
+#define PV_CAP_SERVICE (1u << 2)   /* keep running in the background while enabled */
 
 /* Return values. Anything non-zero is a failure and PicoView carries on as if
    the plugin had not been there. */
@@ -98,6 +99,15 @@ typedef struct PvPlugin {
 
     /* Called before the DLL is unloaded. */
     void (*shutdown)(void);
+
+    /* PV_CAP_SERVICE. Started once, from PicoView's interface thread, when the
+       plugin is loaded and switched on; stopped before it is switched off or
+       unloaded. A service that needs its own window or message loop should
+       make its own thread here and not block. Fields below this point were
+       added after the first plugins were written, so PicoView checks `size`
+       before reading them - always set size to sizeof(PvPlugin). */
+    int  (*service_start)(void);
+    void (*service_stop)(void);
 } PvPlugin;
 
 /* The one export. Must be named exactly this.

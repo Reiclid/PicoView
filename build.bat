@@ -46,17 +46,20 @@ fxc /nologo /T ps_4_0 /E PSMain /O3 /Fh build\blob_ps.h /Vn kBlobPS src\blob.hls
 
 echo [3/3] compiling
 set CFLAGS=/nologo /std:c++17 /utf-8 /permissive- /Zc:__cplusplus /W3 /MP /EHsc /DUNICODE /D_UNICODE /O2 /Oi /Gy /DNDEBUG /MT /I build
-rem  mf.dll is only touched by the converter's worker thread, so it is delay
-rem  loaded: nothing about opening a picture should wait for it.
-set LFLAGS=/link /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /INCREMENTAL:NO /DELAYLOAD:mf.dll
+rem  mf.dll is only touched by the converter's worker thread, and winhttp and
+rem  bcrypt only when someone opens the plugin catalogue, so all three are
+rem  delay loaded: nothing about opening a picture should wait for them.
+set LFLAGS=/link /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /INCREMENTAL:NO /DELAYLOAD:mf.dll ^
+ /DELAYLOAD:winhttp.dll /DELAYLOAD:bcrypt.dll
 set LIBS=user32.lib gdi32.lib shell32.lib shlwapi.lib ole32.lib oleaut32.lib uuid.lib ^
  comdlg32.lib advapi32.lib propsys.lib d3d11.lib dxgi.lib d2d1.lib dwrite.lib dcomp.lib ^
- windowscodecs.lib dwmapi.lib mfplat.lib mfuuid.lib mfreadwrite.lib mf.lib delayimp.lib
+ windowscodecs.lib dwmapi.lib mfplat.lib mfuuid.lib mfreadwrite.lib mf.lib delayimp.lib ^
+ winhttp.lib bcrypt.lib
 
 cl %CFLAGS% /Fo:build\ /Fd:build\ src\main.cpp src\ui.cpp src\gfx.cpp src\decode.cpp ^
    src\loader.cpp src\util.cpp src\video.cpp src\lang.cpp src\encode.cpp ^
    src\convert.cpp src\envelope.cpp src\loudness.cpp src\coverart.cpp src\blob.cpp ^
-   src\plugins.cpp ^
+   src\plugins.cpp src\store.cpp ^
    build\app.res /Fe:PicoView.exe %LFLAGS% %LIBS% || exit /b 1
 
 echo.

@@ -226,8 +226,36 @@ bool pluginsEnhanceAvailable();
 wstring pluginsFolder();
 wstring pluginsUserFolder();
 bool pluginDecode(const wstring& path, PixelBuf& out, bool& hasAlpha);
+// Take on a plugin that has just appeared on disk, or drop one that is about
+// to be deleted. Both work while the program is running.
+void pluginsAdopt(const wstring& dir, const wstring& file);
+void pluginsForget(const wstring& file);
+bool pluginsHave(const wstring& file);
+// Starts and stops background-service plugins. Must be called from the thread
+// that owns the window; returns immediately when nothing changed.
+void pluginsTickServices();
 bool pluginEnhance(const uint8_t* bgra, int w, int h, int stride, int scale,
                    PixelBuf& out, wstring& usedName);
+
+// ---------------------------------------------------------------- plugin store
+// One entry of the catalogue the project publishes. Fetched only when the
+// plugins page is opened, never at startup.
+struct StoreItem {
+    wstring id, file, name, author, version, description, extensions, platform;
+    wstring url, sha256;
+    int     bytes = 0;
+    int     status = 0;      // 0 offered, 1 downloading, 2 installed, 3 failed
+    int     got = 0;         // bytes so far, while downloading
+    wstring error;
+};
+void pluginStoreRefresh(bool force);
+int  pluginStoreState();     // 0 idle, 1 fetching, 2 ready, 3 failed
+bool pluginStoreBusy();
+wstring pluginStoreError();
+wstring pluginStoreSource();
+std::vector<StoreItem> pluginStoreItems();
+void pluginStoreInstall(const wstring& id);
+void pluginStoreRemove(const wstring& id);
 
 // ---------------------------------------------------------------- decoding
 void     decodeInit();

@@ -65,3 +65,9 @@ ehthumbs.db
 ehthumbs_vista.db
 [Dd]esktop.ini
 $RECYCLE.BIN/
+
+# Built plugins live beside the exe and are not tracked; the ones published
+# through the catalogue are, on purpose - see plugins/dist.
+plugins/*.dll
+!plugins/dist/**/*.dll
+plugins/*/build/
