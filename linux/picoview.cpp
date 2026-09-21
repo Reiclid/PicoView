@@ -424,11 +424,17 @@ void drawBar(pv::Canvas& c, int W, int H) {
     pv::drawTextIn(c, g.fBody, buf, pct, kTextDim, pv::Align::Centre);
 }
 
-// Where the seek bar lives, so drawing and clicking agree about it.
-pv::Rect seekRect(int W, int H) {
+// The strip above the command bar: a pill with the time at each end and the
+// track between them. Two functions so that drawing and hit testing cannot
+// drift apart - the same mistake the command bar made once already.
+pv::Rect seekPill(int W, int H) {
     pv::Rect bar, pct;
     layoutBar(W, H, bar, pct);
-    return pv::Rect{ bar.x + 16, bar.y - 22, bar.w - 32, 14 };
+    return pv::Rect{ bar.x, bar.y - 42, bar.w, 32 };
+}
+pv::Rect seekRect(int W, int H) {
+    pv::Rect p = seekPill(W, H);
+    return pv::Rect{ p.x + 62, p.y + p.h * 0.5f - 7.f, p.w - 124, 14 };
 }
 
 std::string clockOf(double seconds) {
@@ -445,22 +451,27 @@ void drawSeek(pv::Canvas& c, int W, int H) {
     double dur = g.video.duration();
     if (!(dur > 0)) return;
 
+    pv::Rect pill = seekPill(W, H);
     pv::Rect r = seekRect(W, H);
     pv::Rect track{ r.x, r.y + r.h * 0.5f - 2.f, r.w, 4.f };
 
-    pv::dropShadow(c, pv::Rect{ r.x - 10, r.y - 6, r.w + 20, r.h + 12 }, 10.f, 8.f, 0.4f);
-    pv::fillRound(c, pv::Rect{ r.x - 10, r.y - 6, r.w + 20, r.h + 12 }, 10.f, kBar);
+    pv::dropShadow(c, pill, pill.h * 0.5f, 10.f, 0.5f);
+    pv::fillRound(c, pill, pill.h * 0.5f, kBar);
+    pv::strokeRound(c, pill, pill.h * 0.5f, 1.f, kBarEdge);
 
     float t = (float)(g.video.position() / dur);
     t = t < 0 ? 0 : (t > 1 ? 1 : t);
     pv::fillRound(c, track, 2.f, pv::rgba(255, 255, 255, 0.22f));
     pv::fillRound(c, pv::Rect{ track.x, track.y, track.w * t, track.h }, 2.f, kAccent);
-    pv::fillRound(c, pv::Rect{ track.x + track.w * t - 5.f, r.y + r.h * 0.5f - 5.f, 10.f, 10.f },
-                  5.f, kText);
+    pv::fillRound(c, pv::Rect{ track.x + track.w * t - 6.f, r.y + r.h * 0.5f - 6.f, 12.f, 12.f },
+                  6.f, kText);
 
-    std::string now = clockOf(g.video.position()) + "  /  " + clockOf(dur);
-    pv::Rect tb{ r.x, r.y - 20, r.w, 18 };
-    pv::drawTextIn(c, g.fSmall, now.c_str(), tb, kTextDim, pv::Align::Centre);
+    // Inside the pill, one time at each end, where they are always readable.
+    pv::drawTextIn(c, g.fSmall, clockOf(g.video.position()).c_str(),
+                   pv::Rect{ pill.x + 12, pill.y, 46, pill.h }, kText);
+    pv::drawTextIn(c, g.fSmall, clockOf(dur).c_str(),
+                   pv::Rect{ pill.right() - 58, pill.y, 46, pill.h }, kTextDim,
+                   pv::Align::Right);
 }
 
 void drawCaption(pv::Canvas& c, int W) {
@@ -468,8 +479,10 @@ void drawCaption(pv::Canvas& c, int W) {
 
     std::string name = nameOf(g.files[g.index]);
     char meta[96];
-    if (g.image.ok)
-        snprintf(meta, sizeof(meta), "%d x %d   %d/%d", g.image.w, g.image.h,
+    int mw = g.video.hasVideo() ? g.video.width() : (g.image.ok ? g.image.w : 0);
+    int mh = g.video.hasVideo() ? g.video.height() : (g.image.ok ? g.image.h : 0);
+    if (mw > 0 && mh > 0)
+        snprintf(meta, sizeof(meta), "%d x %d   %d/%d", mw, mh,
                  g.index + 1, (int)g.files.size());
     else
         snprintf(meta, sizeof(meta), "%d/%d", g.index + 1, (int)g.files.size());
@@ -619,11 +632,9 @@ bool overBar(double x, double y) {
     pv::Rect bar, pct;
     layoutBar(g.width, g.height, bar, pct);
     if (bar.contains((float)x, (float)y)) return true;
-    if (g.video.isOpen() && g.video.duration() > 0) {
-        pv::Rect r = seekRect(g.width, g.height);
-        if (pv::Rect{ r.x - 10, r.y - 8, r.w + 20, r.h + 16 }.contains((float)x, (float)y))
-            return true;
-    }
+    if (g.video.isOpen() && g.video.duration() > 0 &&
+        seekPill(g.width, g.height).contains((float)x, (float)y))
+        return true;
     return false;
 }
 
@@ -633,9 +644,7 @@ bool seekFromPoint(double x, double y, bool starting) {
     double dur = g.video.duration();
     if (!(dur > 0)) return false;
     pv::Rect r = seekRect(g.width, g.height);
-    if (starting &&
-        !pv::Rect{ r.x - 10, r.y - 8, r.w + 20, r.h + 16 }.contains((float)x, (float)y))
-        return false;
+    if (starting && !seekPill(g.width, g.height).contains((float)x, (float)y)) return false;
     float t = (float)((x - r.x) / std::max(1.f, r.w));
     t = t < 0 ? 0 : (t > 1 ? 1 : t);
     g.video.seekTo(dur * t);
