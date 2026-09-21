@@ -1,0 +1,6 @@
+# Files that are only ever consumed on Linux keep Unix line endings even when
+# the repository is checked out on Windows: makepkg and meson do not forgive
+# carriage returns, and this repository is worked on from both sides.
+linux/**        text eol=lf
+packaging/**    text eol=lf
+*.sh            text eol=lf
