@@ -1,5 +1,16 @@
 # PicoView
 
+Ultralight portable image, video and music viewer for Windows 11: a single `PicoView.exe` of about 1.1 MB, with no installer, .NET or DLLs.
+
+- **Speed:** a 24 MP JPEG (6000×4000) decodes in 25 ms. Opening a file in the running app takes 9–10 ms, and a cold start takes about 300 ms.
+- **Formats:** 76 input formats through Windows Imaging Component, with stb_image as a fallback, and a built-in format converter.
+- **Stack:** C++17, Win32, Direct3D 11, Direct2D, DirectComposition, Media Foundation, CMake.
+- **Extensible:** a plugin system with minimal startup cost. See [docs/plugins.md](docs/plugins.md).
+
+The detailed documentation below is in Ukrainian.
+
+---
+
 Надлегкий портативний переглядач зображень, відео та музики для Windows 11.
 Один файл `PicoView.exe` (~1.1 МБ), без інсталяції, без .NET, без жодних DLL.
 
